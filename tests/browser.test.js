@@ -74,6 +74,17 @@ const drag = async (page, x, y, dx, dy) => {
   await page.mouse.move(x, y); await page.mouse.down();
   await page.mouse.move(x + dx, y + dy, { steps: 6 }); await page.mouse.up();
 };
+async function touchGesture(session, steps) {
+  // Model a stationary release, not a fling that Linux Chromium can use to
+  // suppress the following tap. Timestamp the events without sleeping.
+  const releasedAt = Date.now() / 1000;
+  for (let i = 0; i < steps.length; i++) await session.send('Input.dispatchTouchEvent', {
+    type: i === 0 ? 'touchStart' : 'touchMove',
+    touchPoints: steps[i].map(([x, y], id) => ({ x, y, id })),
+    timestamp: releasedAt - .2 - (steps.length - 1 - i) * .05,
+  });
+  await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [], timestamp: releasedAt });
+}
 async function chooseCity(page, name) {
   await page.getByRole('searchbox', { name: 'Search built-in cities' }).fill(name);
   await button(page, 'Select').click();
@@ -277,44 +288,44 @@ test('desktop project-subpath journey: time, sky, privacy, continuous flight, gl
 
 test('emulated phone: touch drag/pinch/orbit/return, no overflow, no stale location override', async t => {
   const { page, errors } = await opened(t, { ...devices['iPhone 13'], defaultBrowserType: undefined, reducedMotion: 'reduce' }, () => {
+    window.locationRequests = [];
     navigator.geolocation.getCurrentPosition = (success, reject) => {
-      window.locationCallback = success; window.locationFailure = reject;
+      window.locationRequests.push({ success, reject });
     };
   });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await inCheese(page);
   const session = await page.context().newCDPSession(page);
-  async function gesture(steps) {
-    for (let i = 0; i < steps.length; i++) await session.send('Input.dispatchTouchEvent', {
-      type: i === 0 ? 'touchStart' : 'touchMove', touchPoints: steps[i].map(([x, y], id) => ({ x, y, id })),
-    });
-    await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  async function locate(requestCount) {
+    await button(page, 'Use my location').tap();
+    await button(page, 'Locating…').waitFor({ timeout: 5000 });
+    assert.equal(await page.evaluate(() => window.locationRequests.length), requestCount);
   }
   const bounds = await region(page).boundingBox(), x = bounds.x + 120, y = bounds.y + 120;
   const interior = await region(page).screenshot();
-  await gesture([[[x, y]], [[x + 50, y + 22]]]);
+  await touchGesture(session, [[[x, y]], [[x + 50, y + 22]]]);
   assert.notDeepEqual(await region(page).screenshot(), interior);
-  await button(page, 'Use my location').tap();
+  await locate(1);
   await button(page, 'Pick a place').tap();
   await chooseCity(page, 'Sydney');
-  await page.evaluate(() => window.locationCallback({ coords: { latitude: 1, longitude: -130 } }));
+  await page.evaluate(() => window.locationRequests[0].success({ coords: { latitude: 1, longitude: -130 } }));
   assert.equal(await page.locator('#site').textContent(), 'Sydney');
   const bearing = await page.locator('#bearing').textContent();
   const surface = await region(page).boundingBox();
-  await gesture([[[surface.x + 120, surface.y + 120]], [[surface.x + 170, surface.y + 142]]]);
+  await touchGesture(session, [[[surface.x + 120, surface.y + 120]], [[surface.x + 170, surface.y + 142]]]);
   await page.waitForFunction(before => document.getElementById('bearing').textContent !== before, bearing);
-  await button(page, 'Use my location').tap();
-  await page.evaluate(() => window.locationFailure({ code: 3 }));
+  await locate(2);
+  await page.evaluate(() => window.locationRequests[1].reject({ code: 3 }));
   assert.match(await page.locator('#location-status').textContent(), /timed out/);
   assert.equal(await page.locator('#site').textContent(), 'Sydney');
-  await button(page, 'Use my location').tap();
-  await page.evaluate(() => window.locationCallback({ coords: { latitude: 12, longitude: -130 } }));
+  await locate(3);
+  await page.evaluate(() => window.locationRequests[2].success({ coords: { latitude: 12, longitude: -130 } }));
   assert.equal(await page.locator('#site').textContent(), 'Your location');
   await button(page, 'Lift off ↗').tap();
   await heading(page, 'Globe view');
   const orbit = await region(page).boundingBox(), ox = orbit.x + 120, oy = orbit.y + 100;
-  await gesture([[[ox, oy]], [[ox + 40, oy + 15]]]);
-  await gesture([[[ox, oy], [ox + 40, oy]], [[ox - 20, oy], [ox + 60, oy]]]);
+  await touchGesture(session, [[[ox, oy]], [[ox + 40, oy + 15]]]);
+  await touchGesture(session, [[[ox, oy], [ox + 40, oy]], [[ox - 20, oy], [ox + 60, oy]]]);
   await button(page, 'Zoom in').tap();
   await button(page, 'Return to surface ↓').tap();
   await heading(page, 'Surface sky');
@@ -508,13 +519,18 @@ test('normal-motion 3D round trip from manual coordinates completes and keeps th
   const { page, errors, requests } = await opened(t, { viewport: { width: 1280, height: 720 }, reducedMotion: 'no-preference' }, controlledFrames, false);
   await page.evaluate(() => {
     const phase = document.getElementById('ride-phase');
-    window.runRide = () => {
+    const gl = document.getElementById('space').getContext('webgl2');
+    window.runRide = async () => {
       // The software renderer may miss wall-clock deadlines. Advance through the
       // actual app RAF one frame at a time and keep every observed phase change.
       const seen = [phase.textContent];
       for (let i = 0; i < 60 && !document.getElementById('rocket-ride').hidden; i++) {
         window.stepFrames(1, i === 0 ? 3000 : 300);
         if (phase.textContent !== seen.at(-1)) seen.push(phase.textContent);
+        // Keep software WebGL from queuing the entire ride in one browser task.
+        // The next pointer action still needs native frames for its stability check.
+        gl.finish();
+        await scheduler.yield();
       }
       return seen;
     };
@@ -635,9 +651,7 @@ test('phone touch reaches the far side, looks around, and returns with a running
   const oldBearing = await page.locator('#bearing').textContent();
   const { x, y } = await region(page).boundingBox();
   const touch = await page.context().newCDPSession(page);
-  for (const [type, points] of [['touchStart', [[100, 120]]], ['touchMove', [[154, 55]]], ['touchEnd', []]]) {
-    await touch.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([dx, dy]) => ({ x: x + dx, y: y + dy })) });
-  }
+  await touchGesture(touch, [[[x + 100, y + 120]], [[x + 154, y + 55]]]);
   await page.waitForFunction(old => document.getElementById('bearing').textContent !== old, oldBearing);
   const returnedFrom = await clock(page);
   await button(page, 'Return to Earth').tap();
