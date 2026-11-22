@@ -46,8 +46,9 @@ const button = (page, name) => page.getByRole('button', { name, exact: true });
 const clock = page => page.locator('#local-clock').getAttribute('datetime');
 const heading = (page, name) => page.getByRole('heading', { name, exact: true }).waitFor({ timeout: 5000 });
 function controlledFrames() {
-  let now = 0, callbacks = [];
-  Date.now = () => Date.parse('2024-04-08T12:00:00.000Z');
+  let now = 0, wall = Date.parse('2024-04-08T12:00:00.000Z'), callbacks = [];
+  Date.now = () => wall;
+  window.setWallTime = iso => { wall = Date.parse(iso); };
   performance.now = () => now;
   requestAnimationFrame = callback => callbacks.push(callback);
   window.stepFrames = (count, delta) => {
@@ -408,6 +409,73 @@ test('globe bounds playback samples without delaying camera input or paused edit
   await frames(1, 1);
   assert.equal(await badge.textContent(), initial);
   assert.equal(await clock(page), fixed);
+  assert.deepEqual(errors, []);
+});
+
+test('playback changes speed continuously and Now restores live wall time', async t => {
+  const { page, errors } = await opened(t, {}, controlledFrames, false);
+  const frame = ms => page.evaluate(delta => window.stepFrames(1, delta), ms);
+  const wall = iso => page.evaluate(time => window.setWallTime(time), iso);
+  const speed = page.getByLabel('Playback speed');
+  await button(page, 'Try demo sky').dispatchEvent('click');
+  await wall('2024-04-08T12:00:04.000Z');
+  await frame(10);
+  assert.equal(await clock(page), '2024-04-08T12:00:04.000Z');
+
+  await wall('2024-04-08T12:00:06.000Z');
+  await speed.selectOption('60');
+  await frame(0);
+  assert.equal(await clock(page), '2024-04-08T12:00:06.000Z');
+  await frame(1000);
+  assert.equal(await clock(page), '2024-04-08T12:01:06.000Z');
+  await speed.selectOption('3600');
+  await frame(0);
+  assert.equal(await clock(page), '2024-04-08T12:01:06.000Z');
+  await frame(1000);
+  assert.equal(await clock(page), '2024-04-08T13:01:06.000Z');
+
+  await wall('2024-04-08T12:00:08.000Z');
+  await button(page, 'Now').dispatchEvent('click');
+  await frame(0);
+  assert.equal(await clock(page), '2024-04-08T12:00:08.000Z');
+  assert.equal(await speed.inputValue(), '1');
+  await wall('2024-04-08T12:00:17.000Z');
+  await frame(10);
+  assert.equal(await clock(page), '2024-04-08T12:00:17.000Z');
+  assert.ok(await button(page, 'Pause').isEnabled());
+  assert.deepEqual(errors, []);
+});
+
+test('editing civil time pauses running playback at the selected instant', async t => {
+  const { page, errors } = await opened(t, {}, controlledFrames, false);
+  await button(page, 'Try demo sky').dispatchEvent('click');
+  await page.getByLabel('Playback speed').selectOption('60');
+  await page.getByLabel('Enter local time').fill('12:30:00');
+  await page.evaluate(() => window.stepFrames(1, 1000));
+
+  assert.ok(await button(page, 'Play').isEnabled());
+  assert.equal(await clock(page), '2024-04-08T12:30:00.000Z');
+  assert.deepEqual(errors, []);
+});
+
+test('playback stops at the range end and a site change preserves that instant', async t => {
+  const { page, errors } = await opened(t, {}, controlledFrames, false);
+  await button(page, 'Try demo sky').dispatchEvent('click');
+  await page.getByLabel('Enter local date').fill('2100-12-31');
+  await page.getByLabel('Enter local time').fill('23:59:59');
+  await button(page, 'Play').dispatchEvent('click');
+  await page.evaluate(() => window.stepFrames(1, 1000));
+
+  const end = '2100-12-31T23:59:59.999Z';
+  assert.equal(await clock(page), end);
+  assert.ok(await button(page, 'Play').isEnabled());
+  await page.getByRole('status').filter({ hasText: 'Playback stopped at the supported local date boundary.' }).waitFor();
+
+  await chooseCity(page, 'Tokyo');
+  await page.evaluate(() => window.stepFrames(1, 1000));
+  assert.equal(await clock(page), end);
+  assert.ok(await button(page, 'Play').isEnabled());
+  await page.getByRole('status').filter({ hasText: 'The same instant falls just outside this location’s supported dates.' }).waitFor();
   assert.deepEqual(errors, []);
 });
 

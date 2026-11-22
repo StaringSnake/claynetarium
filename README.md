@@ -18,11 +18,18 @@ Open <http://127.0.0.1:8000/>. Do not open the source HTML directly. `dist/` is 
 
 Use the date dial or a date field for large jumps, and the time-of-day dial or time field for finer changes. Edits pause playback. Drag the sky or use arrow keys to look around; in globe mode, drag to orbit and pinch, scroll, or use the zoom buttons. In pin mode, click/tap Earth or use the viewport's arrow keys and Enter to pin the center. The orbit overview compresses the separation and enlarges the Moon; the default globe mode does neither. The surface marker and its label are annotations, not physical objects.
 
+## Code map
+
+- [`src/app.js`](src/app.js): browser entry point, controls, rendering, and travel.
+- [`src/playback.js`](src/playback.js): simulation instant, speed, live/play state, and bounds.
+- [`src/clock.js`](src/clock.js): civil-time conversion and formatting.
+
 ## Verification
 
 ```sh
-npm test              # Deterministic model and sampled reference fixtures
+npm test              # Deterministic playback, model, and reference fixtures
 npm run test:browser  # Builds, serves under /planetarium/, runs headless Google Chrome
+npm run build         # Produces the static site in dist/
 npm audit
 ```
 

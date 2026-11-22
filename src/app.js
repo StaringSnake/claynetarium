@@ -5,6 +5,7 @@ import { cheeseView } from './cheese-view.js';
 import { globeView } from './globe-view.js';
 import { skyView } from './sky-view.js';
 import { lunarSites, lunarSkyAt, nextLunarSolarEvents } from './lunar.js';
+import { createPlayback } from './playback.js';
 import { rocketView, rideDuration } from './rocket-view.js';
 
 const $ = id => document.getElementById(id);
@@ -20,9 +21,8 @@ const surface = { az: 180, alt: 12 };
 const cheese = { yaw: .38, pitch: -.02 };
 const orbit = { theta: 0, latitude: 0, distance: 4.3, focus: 'earth', overview: false };
 const options = { glare: 1, labels: true, lines: true };
-let instant, rate = 1, playing = true, live = true;
-let startReal, startSim;
-let site = null, clock, range;
+const playback = createPlayback();
+let site = null, clock;
 let lunarSite = null, ride = null, arrival = false, lunarEvents;
 let rocket, travelOpen = false;
 let sky, skySecond, space, spaceInstant, spaceSampleTime, shownDay, shownSecond;
@@ -59,33 +59,23 @@ function showCompatibility() {
     !globe ? 'The 3D globe needs WebGL 2. Lunar travel from Earth is unavailable; the Earth sky still works.' : '');
 }
 
-function clockRange() {
-  return [clock.resolve(FIRST_DAY).instant, clock.resolve(LAST_DAY + 1).instant - 1];
-}
-
-function resetAnchor() {
-  startReal = performance.now();
-  startSim = instant;
+function updatePlaybackBounds() {
+  return playback.setBounds(clock.resolve(FIRST_DAY).instant, clock.resolve(LAST_DAY + 1).instant - 1);
 }
 
 function advance(real = performance.now()) {
-  if (!playing) return;
-  const next = live ? Date.now() : startSim + Math.max(0, real - startReal) * rate;
-  if (next >= range[1] || next < range[0]) {
-    // A travel-preserved instant outside this clock's range must not snap to the boundary.
-    if (instant >= range[0] && instant <= range[1]) instant = clamp(next, range[0], range[1]);
-    playing = false; live = false;
+  if (playback.advance(real, Date.now())) {
     playButton();
     notice('clock-status', `Playback stopped at the supported ${lunarSite ? 'UTC' : 'local'} date boundary.`);
-  } else instant = next;
+  }
 }
 
-function playButton() { $('play').textContent = playing ? 'Pause' : 'Play'; }
+function playButton() { $('play').textContent = playback.playing ? 'Pause' : 'Play'; }
 
 function editClock(day, seconds) {
   if (!Number.isInteger(day) || day < FIRST_DAY || day > LAST_DAY || !Number.isInteger(seconds) || seconds < 0 || seconds >= 86400) return;
   const result = clock.resolve(day, seconds);
-  instant = clamp(result.instant, ...range); playing = false; live = false;
+  playback.edit(result.instant);
   shownSecond = undefined;
   lunarEvents = undefined;
   playButton();
@@ -106,7 +96,7 @@ function selectSite(next, message = '') {
   const firstSite = !site;
   // Capture the instant under the old clock before swapping civil rules.
   if (firstSite) {
-    instant = Date.now(); resetAnchor();
+    playback.startLive(Date.now(), performance.now());
     mode = 'surface'; globePreview = null;
   } else advance();
   cancelLocation();
@@ -116,9 +106,8 @@ function selectSite(next, message = '') {
     if (!(error instanceof RangeError)) throw error;
     site = { ...site, zone: 'UTC', fallback: true }; clock = civilClock('UTC');
   }
-  range = clockRange();
-  if (instant < range[0] || instant > range[1]) {
-    playing = false; live = false; playButton();
+  if (!updatePlaybackBounds()) {
+    playButton();
     notice('clock-status', 'The same instant falls just outside this location’s supported dates. Choose a date to resume.');
   } else notice('clock-status', '');
   shownDay = shownSecond = skySecond = undefined;
@@ -147,7 +136,7 @@ function aimSky() {
 }
 
 function updateSky() {
-  const second = Math.floor(instant / SECOND);
+  const second = Math.floor(playback.instant / SECOND);
   if (skySecond === second) return;
   skySecond = second;
   sky = lunarSite ? lunarSkyAt(second * SECOND, lunarSite) : skyAt(second * SECOND, site);
@@ -155,6 +144,7 @@ function updateSky() {
 }
 
 function updateSpace(real = performance.now()) {
+  const { instant, playing } = playback;
   if (spaceInstant === instant) return false;
   if (playing && spaceInstant !== undefined && real - spaceSampleTime < SPACE_SAMPLE_INTERVAL) return false;
   space = spaceAt(instant);
@@ -165,6 +155,7 @@ function updateSpace(real = performance.now()) {
 
 function updateReadouts() {
   if (shownSecond === skySecond) return;
+  const { instant } = playback;
   const { day, seconds, offset } = clock.parts(instant);
   const date = dateText(day), localTime = timeText(seconds);
   shownSecond = skySecond;
@@ -208,11 +199,12 @@ function updateReadouts() {
 }
 
 function updateLunarEvents() {
+  const { instant } = playback;
   // Keep only the current station's upcoming pair; reuse while time moves forward
   // in the same interval. Clock edits invalidate it, including backward edits.
   if (lunarEvents && instant >= lunarEvents.from &&
       [lunarEvents.sunrise, lunarEvents.sunset].every(event => event === null || event > instant)) return;
-  lunarEvents = { from: instant, ...nextLunarSolarEvents(instant, range[1], lunarSite) };
+  lunarEvents = { from: instant, ...nextLunarSolarEvents(instant, playback.end, lunarSite) };
   for (const event of ['sunrise', 'sunset']) {
     const at = lunarEvents[event];
     $(`next-${event}`).textContent = at === null ? 'None before the supported UTC date limit' :
@@ -365,9 +357,8 @@ function finishRide(staticFlag = true) {
   ride = null; mode = 'surface'; arrival = staticFlag;
   globe?.resize(width, height, dpi);
   clock = civilClock(lunarSite ? 'UTC' : site.zone);
-  range = clockRange();
-  if (instant < range[0] || instant > range[1]) {
-    playing = false; live = false; playButton();
+  if (!updatePlaybackBounds()) {
+    playButton();
     notice('clock-status', `The same instant is outside this station’s supported ${lunarSite ? 'UTC' : 'local'} dates. Choose a date to resume.`);
   } else notice('clock-status', '');
   const station = lunarSite ?? site;
@@ -510,26 +501,26 @@ $('coordinate-form').addEventListener('submit', event => {
 
 $('play').addEventListener('click', () => {
   advance();
-  if (!playing && (instant < range[0] || instant >= range[1])) {
+  if (!playback.toggle(performance.now())) {
     notice('clock-status', 'Choose a date or select Now to resume playback.'); return;
   }
-  playing = !playing; live = false; resetAnchor(); playButton(); notice('clock-status', '');
+  playButton(); notice('clock-status', '');
 });
 $('now').addEventListener('click', () => {
-  instant = Date.now(); playing = true; live = true; rate = 1;
+  playback.startLive(Date.now(), performance.now());
   spaceInstant = undefined;
   lunarEvents = shownSecond = undefined;
-  $('speed').value = '1'; resetAnchor(); playButton(); notice('clock-status', '');
+  $('speed').value = String(playback.rate); playButton(); notice('clock-status', '');
 });
 $('speed').addEventListener('change', () => {
-  advance(); rate = Number($('speed').value); live = false; resetAnchor();
+  advance(); playback.setRate(Number($('speed').value), performance.now());
 });
 $('date-dial').min = FIRST_DAY; $('date-dial').max = LAST_DAY;
-$('date-dial').addEventListener('input', event => editClock(event.target.valueAsNumber, clock.parts(instant).seconds));
-$('time-dial').addEventListener('input', event => editClock(clock.parts(instant).day, event.target.valueAsNumber));
+$('date-dial').addEventListener('input', event => editClock(event.target.valueAsNumber, clock.parts(playback.instant).seconds));
+$('time-dial').addEventListener('input', event => editClock(clock.parts(playback.instant).day, event.target.valueAsNumber));
 for (const [id, parse, format] of [
-  ['date-edit', input => editClock(input.valueAsNumber / DAY, clock.parts(instant).seconds), () => dateText(clock.parts(instant).day)],
-  ['time-edit', input => editClock(clock.parts(instant).day, input.valueAsNumber / SECOND), () => timeText(clock.parts(instant).seconds)],
+  ['date-edit', input => editClock(input.valueAsNumber / DAY, clock.parts(playback.instant).seconds), () => dateText(clock.parts(playback.instant).day)],
+  ['time-edit', input => editClock(clock.parts(playback.instant).day, input.valueAsNumber / SECOND), () => timeText(clock.parts(playback.instant).seconds)],
 ]) {
   $(id).addEventListener('change', event => {
     if (event.target.validity.valid) parse(event.target);
@@ -558,8 +549,8 @@ for (const event of ['sunrise', 'sunset']) {
     if (!lunarSite) return;
     advance();
     const target = lunarEvents?.[event];
-    if (target == null || target <= instant) { updateLunarEvents(); return; }
-    instant = target; playing = false; live = false;
+    if (target == null || target <= playback.instant) { updateLunarEvents(); return; }
+    playback.pauseAt(target);
     lunarEvents = shownSecond = undefined;
     playButton(); notice('clock-status', '');
     updateSky(); updateReadouts();
