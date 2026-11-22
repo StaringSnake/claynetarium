@@ -7,17 +7,16 @@ export function radial(theta, latitude) {
     -Math.cos(latitude) * Math.sin(theta));
 }
 
-export function globeView(canvas, onContextLost) {
+export function globeView(canvas, onUnavailable, onSurfaceReady) {
   const context = canvas.getContext('webgl2', { antialias: true, alpha: false });
   if (!context) return null;
   const renderer = new T.WebGLRenderer({ canvas, context });
-  canvas.addEventListener('webglcontextlost', () => onContextLost(), { once: true });
   const scene = new T.Scene();
   scene.background = new T.Color('#070d17');
   const camera = new T.PerspectiveCamera(53, 1, .0001, 550);
   const unitSphere = new T.SphereGeometry(1, 64, 40);
-  const earth = new T.Mesh(unitSphere, null);
-  const moon = new T.Mesh(unitSphere, null);
+  const earth = new T.Mesh(unitSphere, new T.MeshLambertMaterial({ color: '#2f6a93' }));
+  const moon = new T.Mesh(unitSphere, new T.MeshLambertMaterial({ color: '#a69794' }));
   const earthFrame = new T.Group();
   const marker = new T.Mesh(unitSphere, new T.MeshBasicMaterial({ color: '#ffd38f' }));
   marker.scale.setScalar(.026);
@@ -33,7 +32,40 @@ export function globeView(canvas, onContextLost) {
   const label = new T.Sprite(new T.SpriteMaterial({ map: textTexture }));
   label.center.set(-.03, .46);
   scene.add(label);
-  let lastSite, earthMap;
+  let lastSite, earthMap, needsEarth = true, needsMoon = true;
+  const pending = [];
+  function unavailable() {
+    pending.length = 0;
+    onUnavailable();
+  }
+  canvas.addEventListener('webglcontextlost', unavailable, { once: true });
+
+  function scheduleBake() {
+    // Start each slice in a separate task after a frame, never inside draw().
+    requestAnimationFrame(() => setTimeout(bakeSlice, 0));
+  }
+
+  function bakeSlice() {
+    if (!pending.length) return;
+    const deadline = performance.now() + 4;
+    try {
+      const { body, steps } = pending[0];
+      for (let i = 0; i < 24; i++) {
+        const next = steps.next();
+        if (next.done) {
+          body.material.dispose();
+          body.material = next.value;
+          pending.shift();
+          onSurfaceReady();
+          break;
+        }
+        if (performance.now() >= deadline) break;
+      }
+    } catch {
+      unavailable();
+    }
+    if (pending.length) scheduleBake();
+  }
 
   function resize(width, height, dpi) {
     renderer.setPixelRatio(dpi);
@@ -43,8 +75,16 @@ export function globeView(canvas, onContextLost) {
   }
 
   function draw(model, site, surface, orbit, progress) {
-    earth.material ??= clayEarth();
-    if (site) moon.material ??= clayMoon();
+    const baking = pending.length > 0;
+    if (needsEarth) {
+      needsEarth = false;
+      pending.push({ body: earth, steps: clayEarth() });
+    }
+    if (site && needsMoon) {
+      needsMoon = false;
+      pending.push({ body: moon, steps: clayMoon() });
+    }
+    if (!baking && pending.length) scheduleBake();
     earthFrame.rotation.y = model.spin;
     sun.position.fromArray(model.sun).normalize().multiplyScalar(500);
     moon.position.fromArray(model.moon);

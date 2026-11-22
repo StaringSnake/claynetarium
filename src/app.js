@@ -47,7 +47,7 @@ const cheeseRenderer = cheeseView(cheeseCanvas);
 const skyRenderer = skyView(skyCanvas);
 let globe;
 if (skyRenderer) {
-  try { globe = globeView(spaceCanvas, noGlobe); }
+  try { globe = globeView(spaceCanvas, noGlobe, () => { dirty = true; queuePreview(); }); }
   catch { globe = null; }
 }
 if (!globe) noGlobe();
