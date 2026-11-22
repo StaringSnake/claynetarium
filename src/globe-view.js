@@ -1,6 +1,6 @@
 import * as T from 'three';
 import { EARTH_KM, MOON_KM, RAD } from './astronomy.js';
-import { clayEarth, clayMoon, rocketEarthMap } from './orbit-surfaces.js';
+import { bodySurfaces } from './orbit-surfaces.js';
 
 export function radial(theta, latitude) {
   return new T.Vector3(Math.cos(latitude) * Math.cos(theta), Math.sin(latitude),
@@ -15,8 +15,9 @@ export function globeView(canvas, onUnavailable, onSurfaceReady) {
   scene.background = new T.Color('#070d17');
   const camera = new T.PerspectiveCamera(53, 1, .0001, 550);
   const unitSphere = new T.SphereGeometry(1, 64, 40);
-  const earth = new T.Mesh(unitSphere, new T.MeshLambertMaterial({ color: '#2f6a93' }));
-  const moon = new T.Mesh(unitSphere, new T.MeshLambertMaterial({ color: '#a69794' }));
+  const surfaces = bodySurfaces(onSurfaceReady);
+  const earth = new T.Mesh(unitSphere, surfaces.earth);
+  const moon = new T.Mesh(unitSphere, surfaces.moon);
   const earthFrame = new T.Group();
   const marker = new T.Mesh(unitSphere, new T.MeshBasicMaterial({ color: '#ffd38f' }));
   marker.scale.setScalar(.026);
@@ -32,43 +33,12 @@ export function globeView(canvas, onUnavailable, onSurfaceReady) {
   const label = new T.Sprite(new T.SpriteMaterial({ map: textTexture }));
   label.center.set(-.03, .46);
   scene.add(label);
-  let lastSite, earthMap, needsEarth = true, needsMoon = true;
-  const pending = [];
+  let lastSite;
   function unavailable() {
-    pending.length = 0;
+    surfaces.cancel();
     onUnavailable();
   }
   canvas.addEventListener('webglcontextlost', unavailable, { once: true });
-
-  function scheduleBake() {
-    // Start each slice in a separate task after a frame, never inside draw().
-    requestAnimationFrame(() => setTimeout(bakeSlice, 0));
-  }
-
-  function bakeSlice() {
-    if (!pending.length) return;
-    const deadline = performance.now() + 4;
-    const { body, steps } = pending[0];
-    for (let i = 0; i < 24; i++) {
-      let next;
-      try {
-        next = steps.next();
-      } catch {
-        // Relief is optional. Keep this body's solid material and continue the queue.
-        pending.shift();
-        break;
-      }
-      if (next.done) {
-        body.material.dispose();
-        body.material = next.value;
-        pending.shift();
-        onSurfaceReady();
-        break;
-      }
-      if (performance.now() >= deadline) break;
-    }
-    if (pending.length) scheduleBake();
-  }
 
   function resize(width, height, dpi) {
     renderer.setPixelRatio(dpi);
@@ -78,16 +48,7 @@ export function globeView(canvas, onUnavailable, onSurfaceReady) {
   }
 
   function draw(model, site, surface, orbit, progress) {
-    const baking = pending.length > 0;
-    if (needsEarth) {
-      needsEarth = false;
-      pending.push({ body: earth, steps: clayEarth() });
-    }
-    if (site && needsMoon) {
-      needsMoon = false;
-      pending.push({ body: moon, steps: clayMoon() });
-    }
-    if (!baking && pending.length) scheduleBake();
+    surfaces.request(Boolean(site));
     earthFrame.rotation.y = model.spin;
     sun.position.fromArray(model.sun).normalize().multiplyScalar(500);
     moon.position.fromArray(model.moon);
@@ -145,5 +106,5 @@ export function globeView(canvas, onUnavailable, onSurfaceReady) {
     return { lat: Math.atan2(py, Math.hypot(px, pz)) / RAD, lon: Math.atan2(-pz, px) / RAD };
   }
 
-  return { resize, draw, pick, renderer, get earthMap() { return earthMap ??= rocketEarthMap(); } };
+  return { resize, draw, pick, renderer, surfaces };
 }

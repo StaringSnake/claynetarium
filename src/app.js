@@ -320,7 +320,7 @@ function startRide(destination) {
     return;
   }
   try {
-    rocket ??= rocketView(globe.renderer, globe.earthMap);
+    rocket ??= rocketView(globe.renderer, globe.surfaces);
     rocket.begin(site, destination ?? lunarSite, !destination);
     rocket.resize(width, height, dpi);
     rocket.draw(0);

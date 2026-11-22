@@ -21,14 +21,15 @@ export function clayPalette() {
     const random = seededRandom(81), image = ctx.createImageData(w, h);
     for (let i = 0; i < image.data.length; i += 4) {
       const x = (i / 4) % w, y = Math.floor(i / (4 * w));
-      const gray = 225 + 7 * Math.sin(x * .39 + Math.sin(y * .2)) * Math.cos(y * .49) - random() * 25;
+      const swathe = 10 * Math.cos(y * .092 + 1.1 * Math.sin(x * .048)) * Math.sin(x * .061 + y * .02);
+      const gray = 226 + swathe + 3 * Math.sin(x * .39 + Math.sin(y * .2)) * Math.cos(y * .49) - random() * 10;
       image.data.set([gray, gray, gray, 255], i);
     }
     ctx.putImageData(image, 0, 0);
     ctx.lineWidth = .8;
     for (const [x, y] of [[29, 38], [91, 87]]) {
       for (let r = 6; r < 21; r += 2.8) {
-        ctx.strokeStyle = '#90868190';
+        ctx.strokeStyle = '#998b815e';
         ctx.beginPath(); ctx.ellipse(x, y, r * .65, r, -.38, .1, 4.1); ctx.stroke();
       }
     }
@@ -72,7 +73,7 @@ export function clayRocket(clay) {
   const model = new T.Group();
   const cream = clay('#ffe0ac'), rust = clay('#d4674e'), dark = clay('#522638');
   const bronze = clay('#e2a257'), pale = clay('#fff1ca');
-  const glass = clay('#387a88', { roughness: .3, metalness: .12 });
+  const glass = clay('#387a88', { roughness: .59 });
   piece(model, moldedProfile([[0, .37], [.61, .39], [.85, .58], [.99, 1.16], [.98, 1.95],
     [.83, 2.55], [.61, 3.02], [.33, 3.43], [0, 3.65]], .033), cream);
   piece(model, moldedProfile([[.65, 2.96], [.54, 3.17], [.34, 3.48], [.16, 3.65], [0, 3.69]], .038), rust);

@@ -17,53 +17,63 @@ export function starField() {
   return field;
 }
 
-export function moonTexture() {
-  return paintedTexture(768, 384, (ctx, w, h) => {
-    const random = seededRandom(113);
-    ctx.fillStyle = '#9c9290'; ctx.fillRect(0, 0, w, h);
-    for (let i = 0; i < 1600; i++) {
-      const x = random() * w, y = random() * h, radius = 2 + random() ** 4 * 43;
-      const tone = random() < .5 ? '#dccac0' : '#4d4c5a';
-      const fade = ctx.createRadialGradient(x, y, 0, x, y, radius);
-      fade.addColorStop(0, tone + '53'); fade.addColorStop(1, tone + '00');
-      ctx.fillStyle = fade; ctx.fillRect(x - radius, y - radius, 2 * radius, 2 * radius);
-    }
-    for (let i = 0; i < 560; i++) {
-      const x = random() * w, y = random() * h, r = 1.5 + random() ** 6 * 27;
-      ctx.lineWidth = .65 + r * .13;
-      for (const wrap of [-w, 0, w]) {
-        ctx.beginPath(); ctx.ellipse(x + wrap, y, r, r * .83, .22, 0, 2 * Math.PI);
-        ctx.fillStyle = '#53506045'; ctx.fill();
-        ctx.beginPath(); ctx.ellipse(x + wrap, y, r, r * .83, .22, .4, 3.55);
-        ctx.strokeStyle = '#ecdbce7c'; ctx.stroke();
-        ctx.beginPath(); ctx.ellipse(x + wrap, y, r, r * .83, .22, 3.55, 6.68);
-        ctx.strokeStyle = '#3737484f'; ctx.stroke();
-      }
-    }
-  });
+// Hand-pressed puck: only the perimeter drifts; the soles and flag still sit on y=0.
+function padRim(angle) {
+  return .075 * Math.sin(3 * angle + .45) + .041 * Math.cos(5 * angle - .8)
+    + .025 * Math.sin(9 * angle);
+}
+
+function pressedPad() {
+  const profile = [[0, -.18], [4.11, -.18], [4.32, -.16], [4.43, -.11],
+    [4.43, -.069], [4.38, -.032], [4.26, -.007], [4.09, 0], [0, 0]];
+  const pad = new T.LatheGeometry(profile.map(([r, y]) => new T.Vector2(r, y)), 64);
+  const p = pad.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i);
+    const swell = 1 + padRim(Math.atan2(x, z)) / 4.43;
+    p.setXYZ(i, x * swell, p.getY(i), z * swell);
+  }
+  pad.computeVertexNormals();
+  // LatheGeometry wraps UVs along the profile; use the same planar finish across the puck.
+  const uv = pad.attributes.uv;
+  for (let i = 0; i < uv.count; i++) uv.setXY(i, .5 + p.getX(i) / 9.2, .5 + p.getZ(i) / 9.2);
+  return pad;
+}
+
+function markPad(group, paint, random) {
+  for (let quarter = 0; quarter < 4; quarter++) {
+    const start = quarter * Math.PI / 2 + .05 + random() * .05;
+    const points = Array.from({ length: 13 }, (_, i) => {
+      const angle = start + i * .113;
+      const r = 3.94 + padRim(angle) + .026 * Math.sin(i * 1.13 + quarter);
+      return new T.Vector3(r * Math.sin(angle), -.005 + .006 * Math.sin(i * .61), r * Math.cos(angle));
+    });
+    const cord = new T.TubeGeometry(new T.CatmullRomCurve3(points), 32, .038 + random() * .012, 7, false);
+    piece(group, cord, paint, .73, 0, .12);
+  }
+  const dab = new T.SphereGeometry(1, 12, 8);
+  for (let i = 0; i < 12; i++) {
+    const a = i * Math.PI / 6 + (random() - .5) * .13;
+    const r = 3.61 + padRim(a) + (random() - .5) * .08;
+    piece(group, dab, paint, .73 + r * Math.sin(a), 0, .12 + r * Math.cos(a),
+      .043 + random() * .029, .019, .11 + random() * .07).rotation.y = a + (random() - .5) * .30;
+  }
 }
 
 export function landingTerrain(clay, earth) {
   const group = new T.Group();
-  const base = clay(earth ? '#3d6859' : '#766e7c');
-  const paint = clay(earth ? '#c9d9a4' : '#c4b1a9');
-  const rock = clay(earth ? '#678477' : '#a79ca1');
-  const pad = new T.CylinderGeometry(4.33, 4.52, .18, 64);
-  piece(group, pad, base, .73, -.09, .12);
-  const perimeter = piece(group, new T.RingGeometry(3.95, 4.02, 64), paint, .73, .003, .12);
-  perimeter.rotation.x = -Math.PI / 2;
-  const stripe = new T.BoxGeometry(.09, .014, .31);
-  for (let i = 0; i < 16; i++) {
-    const a = i * Math.PI / 8;
-    piece(group, stripe, paint, .73 + 3.64 * Math.sin(a), .006, .12 + 3.64 * Math.cos(a)).rotation.y = a;
-  }
+  const base = clay(earth ? '#4b775e' : '#918178');
+  const paint = clay(earth ? '#bac990' : '#c2aa98');
+  const rock = clay(earth ? '#678477' : '#a3948c');
+  piece(group, pressedPad(), base, .73, 0, .12);
+  markPad(group, paint, seededRandom(earth ? 117 : 144));
   const rockGeometry = new T.IcosahedronGeometry(1, 1);
-  const rocks = new T.InstancedMesh(rockGeometry, rock, 65);
+  const rocks = new T.InstancedMesh(rockGeometry, rock, 46);
   const random = seededRandom(earth ? 24 : 61), dummy = new T.Object3D();
   const radius = earth ? 19.055 : 6.955;
   for (let i = 0; i < rocks.count; i++) {
     const a = random() * 2 * Math.PI, r = 4.75 + random() * (earth ? 5.5 : 1.8);
-    const size = .065 + .24 * random() ** 2;
+    const size = .062 + .20 * random() ** 2;
     const y = Math.sqrt(radius * radius - r * r) - radius;
     dummy.position.set(r * Math.sin(a), y + size * .38, r * Math.cos(a));
     dummy.rotation.set(random(), a, random()); dummy.scale.set(size * 1.35, size, size * .83);
@@ -121,7 +131,7 @@ export function clayFlag(clay) {
   });
   const cloth = new T.PlaneGeometry(1, 1, 40, 12);
   const fabric = piece(group, cloth, new T.MeshStandardMaterial({ map: flagPaint,
-    bumpMap: flagPaint, bumpScale: .055, roughness: .89, side: T.DoubleSide }));
+    bumpMap: flagPaint, bumpScale: .048, roughness: .96, side: T.DoubleSide }));
   fabric.frustumCulled = false;
   function update(time, raised, open) {
     group.visible = raised > 0;
@@ -133,10 +143,11 @@ export function clayFlag(clay) {
       const loose = Math.min(u, open), rolled = Math.max(0, u - open);
       const wrap = rolled * 19;
       const wave = .18 * Math.sin(loose * 8 - time * 5) * loose * (1 - .85 * open);
+      const rim = loose * open * (.033 * Math.sin(loose * 17 + v * 3) + .016 * Math.sin(loose * 31));
       // Undeployed material is wound around an axis at the moving edge.
       p.setXYZ(i, .035 + 1.83 * loose + .103 * Math.sin(wrap),
-        raised * (2.51 - (1 - v) * (.90 - .27 * u)) - .09 * loose,
-        wave + .103 * (1 - Math.cos(wrap)));
+        raised * (2.51 - (1 - v) * (.90 - .27 * u) + rim) - .09 * loose,
+        wave + .103 * (1 - Math.cos(wrap)) + rim * v);
     }
     p.needsUpdate = true; cloth.computeVertexNormals();
   }

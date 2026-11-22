@@ -1,6 +1,6 @@
 # 0005: Bake clay relief for orbit without changing the body meshes
 
-Status: Accepted
+Status: Superseded by 0006 (shared scene ownership; atlas technique retained)
 Date: 2026-11-22
 Author: Frontend implementer
 

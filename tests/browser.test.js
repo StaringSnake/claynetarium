@@ -382,6 +382,30 @@ test('first lift-off paints before preparing either clay atlas', async t => {
   assert.deepEqual(trace, { reads: 1, frameReads: 0, uploads: 4, firstDraw: { reads: 0, uploads: 0 } });
 });
 
+test('a ride before orbit draws immediately, then orbit reuses both uploaded clay atlases', { timeout: 35000 }, async t => {
+  const { page, errors, requests } = await opened(t, { viewport: { width: 1220, height: 900 } }, watchOrbitBake);
+  await manualSite(page, '23', '-26');
+  await button(page, 'Travel').click();
+  await button(page, 'Apollo 11 · Near side').click();
+  await rocket(page).waitFor({ state: 'visible' });
+  await page.waitForFunction(() => window.orbitBake.uploads >= 4, null, { timeout: 16000 });
+  assert.deepEqual(await page.evaluate(() => window.orbitBake), {
+    reads: 1, frameReads: 0, uploads: 4, firstDraw: { reads: 0, uploads: 0 },
+  });
+
+  await skipRide(page).click();
+  await heading(page, 'Lunar sky');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await button(page, 'Return to Earth').click();
+  await button(page, 'Lift off ↗').click();
+  await heading(page, 'Globe view');
+  await button(page, 'Frame Moon').click();
+  await region(page).screenshot();
+  assert.deepEqual(await page.evaluate(() => [window.orbitBake.reads, window.orbitBake.uploads]), [1, 4]);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(requests, ['', 'styles.css', 'app.js'].map(path => ['GET', url + path]));
+});
+
 test('the observer-free pin preview redraws itself when Earth relief is ready', async t => {
   const { page } = await opened(t, {}, watchOrbitBake);
   await button(page, 'Pick a place').click();
