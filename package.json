@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test tests/model.test.js",
+    "test": "node --test tests/model.test.js tests/playback.test.js",
     "test:browser": "npm run build && node --test tests/browser.test.js"
   },
   "dependencies": {
