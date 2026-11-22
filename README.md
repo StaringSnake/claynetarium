@@ -26,14 +26,16 @@ Use the date dial or a date field for large jumps, and the time-of-day dial or t
 
 ## Verification
 
+CI runs on pull requests and pushes to `main`. The **Verify static site** job reports build and test failures in GitHub Checks and does not deploy. To reproduce it locally, use Node.js 24 and install Google Chrome:
+
 ```sh
+npm ci
+npm run build         # Produces the static site in dist/
 npm test              # Deterministic playback, model, and reference fixtures
 npm run test:browser  # Builds, serves under /planetarium/, runs headless Google Chrome
-npm run build         # Produces the static site in dist/
-npm audit
 ```
 
-Set `CHROME_PATH` to use a nonstandard Chromium executable. Browser tests use one desktop viewport and a Chromium iPhone-sized touch emulation, not Safari or a physical phone. Independent fixtures in `tests/model.test.js` are from [JPL Horizons](https://ssd.jpl.nasa.gov/horizons/) and [USNO Astronomical Applications](https://aa.usno.navy.mil/data/api); none of these services are contacted at runtime.
+Set `CHROME_PATH` to use a nonstandard Chromium executable. Browser tests use one desktop viewport and a Chromium iPhone-sized touch emulation, not Safari or a physical phone. Run `npm audit` separately to check for dependency advisories. Independent fixtures in `tests/model.test.js` are from [JPL Horizons](https://ssd.jpl.nasa.gov/horizons/) and [USNO Astronomical Applications](https://aa.usno.navy.mil/data/api); none of these services are contacted at runtime.
 
 ## Model and data limits
 
