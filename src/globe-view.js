@@ -1,42 +1,10 @@
 import * as T from 'three';
-import { feature } from 'topojson-client';
-import land from 'world-atlas/land-110m.json';
 import { EARTH_KM, MOON_KM, RAD } from './astronomy.js';
+import { clayEarth, clayMoon, rocketEarthMap } from './orbit-surfaces.js';
 
 export function radial(theta, latitude) {
   return new T.Vector3(Math.cos(latitude) * Math.cos(theta), Math.sin(latitude),
     -Math.cos(latitude) * Math.sin(theta));
-}
-
-function mapTexture() {
-  const canvas = document.createElement('canvas');
-  canvas.width = 1024; canvas.height = 512;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#234f79'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#80ae95';
-  const { features } = feature(land, land.objects.land);
-  for (const { geometry } of features) {
-    const polygons = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates;
-    for (const polygon of polygons) {
-      ctx.beginPath();
-      for (const ring of polygon) {
-        ring.forEach(([lon, lat], i) => ctx[i ? 'lineTo' : 'moveTo'](
-          (lon + 180) * canvas.width / 360, (90 - lat) * canvas.height / 180));
-        ctx.closePath();
-      }
-      ctx.fill('evenodd');
-    }
-  }
-  ctx.strokeStyle = '#cadbcc36'; ctx.lineWidth = 1;
-  for (let x = 0; x < canvas.width; x += canvas.width / 12) {
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-  }
-  for (let y = canvas.height / 6; y < canvas.height; y += canvas.height / 6) {
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-  }
-  const texture = new T.CanvasTexture(canvas);
-  texture.colorSpace = T.SRGBColorSpace;
-  return texture;
 }
 
 export function globeView(canvas, onContextLost) {
@@ -48,9 +16,8 @@ export function globeView(canvas, onContextLost) {
   scene.background = new T.Color('#070d17');
   const camera = new T.PerspectiveCamera(53, 1, .0001, 550);
   const unitSphere = new T.SphereGeometry(1, 64, 40);
-  const earthMap = mapTexture();
-  const earth = new T.Mesh(unitSphere, new T.MeshLambertMaterial({ map: earthMap }));
-  const moon = new T.Mesh(unitSphere, new T.MeshLambertMaterial({ color: '#a7adb4' }));
+  const earth = new T.Mesh(unitSphere, null);
+  const moon = new T.Mesh(unitSphere, null);
   const earthFrame = new T.Group();
   const marker = new T.Mesh(unitSphere, new T.MeshBasicMaterial({ color: '#ffd38f' }));
   marker.scale.setScalar(.026);
@@ -66,7 +33,7 @@ export function globeView(canvas, onContextLost) {
   const label = new T.Sprite(new T.SpriteMaterial({ map: textTexture }));
   label.center.set(-.03, .46);
   scene.add(label);
-  let lastSite;
+  let lastSite, earthMap;
 
   function resize(width, height, dpi) {
     renderer.setPixelRatio(dpi);
@@ -76,6 +43,8 @@ export function globeView(canvas, onContextLost) {
   }
 
   function draw(model, site, surface, orbit, progress) {
+    earth.material ??= clayEarth();
+    if (site) moon.material ??= clayMoon();
     earthFrame.rotation.y = model.spin;
     sun.position.fromArray(model.sun).normalize().multiplyScalar(500);
     moon.position.fromArray(model.moon);
@@ -133,5 +102,5 @@ export function globeView(canvas, onContextLost) {
     return { lat: Math.atan2(py, Math.hypot(px, pz)) / RAD, lon: Math.atan2(-pz, px) / RAD };
   }
 
-  return { resize, draw, pick, renderer, earthMap };
+  return { resize, draw, pick, renderer, get earthMap() { return earthMap ??= rocketEarthMap(); } };
 }

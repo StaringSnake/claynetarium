@@ -286,6 +286,36 @@ test('desktop project-subpath journey: time, sky, privacy, continuous flight, gl
   assert.deepEqual(requests, ['', 'styles.css', 'app.js'].map(path => ['GET', url + path]));
 });
 
+test('orbit Earth keeps the South Atlantic blue at the latitude of the antimeridian-crossing Fiji coast', async t => {
+  const { page } = await opened(t, { viewport: { width: 1220, height: 900 }, reducedMotion: 'reduce' });
+  await button(page, 'Pick a place').click();
+  await page.getByText('Enter coordinates', { exact: true }).click();
+  await page.getByLabel('Latitude').fill('-16.6');
+  await page.getByLabel('Longitude').fill('-18');
+  await button(page, 'Set coordinates').click();
+  await button(page, 'Pause').click();
+  await button(page, 'Lift off ↗').click();
+  await heading(page, 'Globe view');
+  await button(page, 'Zoom in').click();
+  await button(page, 'Zoom in').click();
+  await region(page).evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+
+  const png = await region(page).screenshot({ scale: 'css' });
+  const colors = await page.evaluate(async source => {
+    const image = new Image(); image.src = `data:image/png;base64,${source}`; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+    const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+    // Exclude the center marker. A line from Fiji mistakenly drawn through
+    // Greenwich crosses this patch of open ocean and introduces green pixels.
+    const patch = ctx.getImageData(image.width / 2 - 55, image.height / 2 - 7, 30, 14).data;
+    const green = Array.from({ length: patch.length / 4 }, (_, i) => patch[4 * i + 1]);
+    const blue = green.map((g, i) => patch[4 * i + 2] - g);
+    return { greenMin: Math.min(...green), blueMargin: Math.min(...blue) };
+  }, png.toString('base64'));
+  assert.ok(colors.greenMin > 25 && colors.blueMargin > 8,
+    `South Atlantic pixels should be rendered ocean blue: ${JSON.stringify(colors)}`);
+});
+
 test('emulated phone: touch drag/pinch/orbit/return, no overflow, no stale location override', async t => {
   const { page, errors } = await opened(t, { ...devices['iPhone 13'], defaultBrowserType: undefined, reducedMotion: 'reduce' }, () => {
     window.locationRequests = [];
