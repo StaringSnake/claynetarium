@@ -48,21 +48,24 @@ export function globeView(canvas, onUnavailable, onSurfaceReady) {
   function bakeSlice() {
     if (!pending.length) return;
     const deadline = performance.now() + 4;
-    try {
-      const { body, steps } = pending[0];
-      for (let i = 0; i < 24; i++) {
-        const next = steps.next();
-        if (next.done) {
-          body.material.dispose();
-          body.material = next.value;
-          pending.shift();
-          onSurfaceReady();
-          break;
-        }
-        if (performance.now() >= deadline) break;
+    const { body, steps } = pending[0];
+    for (let i = 0; i < 24; i++) {
+      let next;
+      try {
+        next = steps.next();
+      } catch {
+        // Relief is optional. Keep this body's solid material and continue the queue.
+        pending.shift();
+        break;
       }
-    } catch {
-      unavailable();
+      if (next.done) {
+        body.material.dispose();
+        body.material = next.value;
+        pending.shift();
+        onSurfaceReady();
+        break;
+      }
+      if (performance.now() >= deadline) break;
     }
     if (pending.length) scheduleBake();
   }

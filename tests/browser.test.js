@@ -301,7 +301,8 @@ async function orbitFromCoordinates(page, latitude, longitude) {
 
 function watchOrbitBake() {
   const trace = window.orbitBake = { reads: 0, frameReads: 0, uploads: 0, firstDraw: null };
-  let inFrame = false;
+  let inFrame = false, orbitContext;
+  window.orbitContextLost = () => orbitContext?.isContextLost();
   const request = window.requestAnimationFrame;
   window.requestAnimationFrame = callback => request(now => {
     inFrame = true;
@@ -312,6 +313,10 @@ function watchOrbitBake() {
     if (!this.canvas.isConnected && this.canvas.width === 1024 && this.canvas.height === 512) {
       trace.reads++;
       if (inFrame) trace.frameReads++;
+      if (window.orbitBakeFault === 'readback') throw new Error('Injected atlas readback failure');
+      if (window.orbitBakeFault === 'context-loss') {
+        queueMicrotask(() => orbitContext.getExtension('WEBGL_lose_context').loseContext());
+      }
     }
     return read.apply(this, args);
   };
@@ -322,6 +327,7 @@ function watchOrbitBake() {
   };
   const draw = WebGL2RenderingContext.prototype.drawElements;
   WebGL2RenderingContext.prototype.drawElements = function (...args) {
+    orbitContext ??= this;
     trace.firstDraw ??= { reads: trace.reads, uploads: trace.uploads };
     return draw.apply(this, args);
   };
@@ -384,6 +390,42 @@ test('the observer-free pin preview redraws itself when Earth relief is ready', 
   await page.waitForFunction(() => window.orbitBake.uploads >= 2);
   const trace = await page.evaluate(() => window.orbitBake);
   assert.deepEqual(trace, { reads: 1, frameReads: 0, uploads: 2, firstDraw: { reads: 0, uploads: 0 } });
+});
+
+test('a failed Earth atlas keeps orbit and pinning available while the Moon atlas finishes', async t => {
+  const { page, errors } = await opened(t, { reducedMotion: 'reduce' }, watchOrbitBake);
+  await page.evaluate(() => { window.orbitBakeFault = 'readback'; });
+  await button(page, 'Try demo sky').click();
+  await button(page, 'Pause').click();
+  await button(page, 'Lift off ↗').click();
+  await heading(page, 'Globe view');
+  await page.waitForFunction(() => window.orbitBake.reads === 1);
+
+  assert.equal(await page.evaluate(() => window.orbitContextLost()), false);
+  assert.equal(await button(page, 'Frame Moon').isVisible(), true);
+  assert.equal(await button(page, 'Frame Moon').isEnabled(), true);
+  await button(page, 'Frame Moon').click();
+  await page.waitForFunction(() => window.orbitBake.uploads === 2);
+  await button(page, 'Frame Earth').click();
+  await button(page, 'Place globe pin').click();
+  await region(page).press('Enter');
+  await page.getByText('Globe pin', { exact: true }).waitFor();
+  assert.deepEqual(await page.evaluate(() => [window.orbitBake.reads, window.orbitBake.uploads]), [1, 2]);
+  assert.deepEqual(errors, []);
+});
+
+test('actual WebGL context loss during atlas baking still disables orbit', async t => {
+  const { page, errors } = await opened(t, { reducedMotion: 'reduce' }, watchOrbitBake);
+  await page.evaluate(() => { window.orbitBakeFault = 'context-loss'; });
+  await button(page, 'Try demo sky').click();
+  await button(page, 'Lift off ↗').click();
+  await page.getByText(/The 3D globe needs WebGL 2/).waitFor();
+  await heading(page, 'Surface sky');
+
+  assert.equal(await page.evaluate(() => window.orbitContextLost()), true);
+  assert.equal(await button(page, 'Lift off ↗').isDisabled(), true);
+  assert.deepEqual(await page.evaluate(() => [window.orbitBake.reads, window.orbitBake.uploads]), [1, 0]);
+  assert.deepEqual(errors, []);
 });
 
 test('emulated phone: touch drag/pinch/orbit/return, no overflow, no stale location override', async t => {
