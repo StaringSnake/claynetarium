@@ -820,7 +820,23 @@ test('the eyepiece keeps the optical axis fixed and displaces the Sun and horizo
 });
 
 test('the Moon label stays beside the disk at high zoom, including near the eyepiece rim', async t => {
-  const { page, errors } = await opened(t, { viewport: { width: 1220, height: 900 }, deviceScaleFactor: 1 });
+  const { page, errors } = await opened(t, { viewport: { width: 1220, height: 900 }, deviceScaleFactor: 1 }, () => {
+    const fillText = CanvasRenderingContext2D.prototype.fillText;
+    CanvasRenderingContext2D.prototype.fillText = function (text, x, y, ...args) {
+      if (this.canvas.id !== 'sky' || text !== 'Moon') return fillText.call(this, text, x, y, ...args);
+      const m = this.measureText(text);
+      const left = x - m.actualBoundingBoxLeft, right = x + m.actualBoundingBoxRight;
+      const top = y - m.actualBoundingBoxAscent, bottom = y + m.actualBoundingBoxDescent;
+      const pixels = () => this.getImageData(Math.floor(left), Math.floor(top),
+        Math.max(1, Math.ceil(right) - Math.floor(left)), Math.max(1, Math.ceil(bottom) - Math.floor(top))).data;
+      // Compare the real fill against the same canvas immediately before it;
+      // there is no assumption about font coverage or exact glyph colors.
+      const before = pixels();
+      fillText.call(this, text, x, y, ...args);
+      const painted = pixels().some((value, i) => value !== before[i]);
+      window.moonLabel = { x, y, left, right, top, bottom, painted };
+    };
+  });
   await page.clock.setFixedTime(new Date('2025-01-06T12:00:00.000Z'));
   await manualSite(page, '35.681', '139.767');
   await button(page, 'Pause').click();
@@ -829,25 +845,30 @@ test('the Moon label stays beside the disk at high zoom, including near the eyep
     const { width, height } = canvas;
     const cx = width / 2, cy = height / 2, radius = Math.min(cx, cy);
     const pixels = canvas.getContext('2d').getImageData(0, 0, width, height).data;
-    let limb = -1, label = Infinity, labelPixels = 0;
+    let left = Infinity, right = -Infinity;
     for (let y = Math.floor(cy) - 30; y <= cy + 30; y++) {
-      for (let x = Math.floor(cx); x < cx + radius; x++) {
+      for (let x = Math.floor(cx - radius); x < cx + radius; x++) {
         if (Math.hypot(x - cx, y - cy) > radius - rimInset) continue;
         const i = 4 * (y * width + x);
         const matches = (r, g, b) => pixels[i] === r && pixels[i + 1] === g && pixels[i + 2] === b;
-        if (matches(244, 234, 215) || matches(52, 64, 78)) limb = Math.max(limb, x);
-        if (matches(241, 246, 255)) {
-          label = Math.min(label, x);
-          labelPixels++;
+        if (matches(244, 234, 215) || matches(52, 64, 78)) {
+          left = Math.min(left, x); right = Math.max(right, x);
         }
       }
     }
-    return { limb, label, labelPixels, rim: cx + radius - rimInset };
+    const label = window.moonLabel;
+    const distances = label ? [label.left - 1.5, label.right + 1.5].flatMap(x =>
+      [label.top - 1.5, label.bottom + 1.5].map(y => Math.hypot(x - cx, y - cy))) : [];
+    return { left, right, label, room: radius - rimInset - Math.max(...distances) };
   }, rimInset);
-  const assertGap = (paint, view) => {
-    const gap = paint.label - paint.limb;
-    assert.ok(paint.limb >= 0 && paint.labelPixels > 5 && gap >= 5 && gap <= 10,
-      `${view}: expected a legible Moon label just right of the limb; got ${JSON.stringify(paint)}, gap ${gap}px`);
+  const assertGap = (paint, view, side = 'right') => {
+    assert.ok(paint.label && Number.isFinite(paint.right), `${view}: expected a Moon limb and label; got ${JSON.stringify(paint)}`);
+    assert.ok(paint.room >= 0, `${view}: label bounds cross the clear field: ${JSON.stringify(paint)}`);
+    assert.ok(paint.label.painted, `${view}: Moon label fill did not change pixels: ${JSON.stringify(paint)}`);
+    const gap = side === 'right' ? paint.label.x - paint.right : paint.left - paint.label.right;
+    // The intended gap is 6 CSS px; allow for the rasterized disk edge.
+    assert.ok(gap >= 4 && gap <= 8,
+      `${view}: expected the label just ${side} of the limb; got ${JSON.stringify(paint)}, gap ${gap}px`);
   };
 
   assertGap(await moonAndLabel(0), 'normal 1×');
@@ -858,12 +879,12 @@ test('the Moon label stays beside the disk at high zoom, including near the eyep
   const { x, y, width, height } = await scene.boundingBox();
   const cx = x + width / 2, cy = y + height / 2;
   // Exclude the CSS mask and rim from the backing-canvas sample.
-  await drag(page, cx, cy, 90, 0);
+  await drag(page, cx, cy, 80, 0);
   assertGap(await moonAndLabel(10), 'off-axis 32×');
-  await drag(page, cx, cy, 18, 0);
+  await drag(page, cx, cy, 28, 0);
   const nearRim = await moonAndLabel(10);
-  assertGap(nearRim, 'near-rim 32×');
-  assert.ok(nearRim.rim - nearRim.label < 24, JSON.stringify(nearRim));
+  assertGap(nearRim, 'near-rim 32×', 'left');
+  assert.ok(width / 2 + Math.min(width, height) / 2 - 10 - nearRim.right < 24, JSON.stringify(nearRim));
   assert.deepEqual(errors, []);
 });
 

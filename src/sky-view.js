@@ -106,6 +106,28 @@ export function skyView(canvas) {
       ctx.strokeStyle = '#101926'; ctx.lineWidth = 3;
       ctx.strokeText(text, x, y); ctx.fillStyle = '#f1f6ff'; ctx.fillText(text, x, y);
     }
+    function diskLabel(text, x, y, radius) {
+      const clearRadius = field - 10;
+      const right = throughLens(x + radius, y);
+      const ink = ctx.measureText(text);
+      // Keep the outlined glyphs inside the clear field, before the CSS rim.
+      const fits = (x, y) => {
+        const dx = Math.max(Math.abs(x - ink.actualBoundingBoxLeft - 1.5 - cx),
+          Math.abs(x + ink.actualBoundingBoxRight + 1.5 - cx));
+        const dy = Math.max(Math.abs(y - ink.actualBoundingBoxAscent - 1.5 - cy),
+          Math.abs(y + ink.actualBoundingBoxDescent + 1.5 - cy));
+        return Math.hypot(dx, dy) <= clearRadius;
+      };
+      if (fits(right.x + 6, right.y - 4)) {
+        label(text, right.x + 6, right.y - 4);
+        return;
+      }
+      const left = throughLens(x - radius, y);
+      const leftX = left.x - 6 - ink.actualBoundingBoxRight;
+      if (Math.hypot(left.x - cx, left.y - cy) <= clearRadius && fits(leftX, left.y - 4)) {
+        label(text, leftX, left.y - 4);
+      }
+    }
     function circle(x, y, r, color) {
       ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fillStyle = color; ctx.fill();
     }
@@ -204,9 +226,8 @@ export function skyView(canvas) {
         }
       }
       if (options.labels) {
-        // Map the pre-lens limb once; the text offset stays in screen pixels.
-        const limb = eyepiece ? throughLens(projected.x + r, projected.y) : { x: x + r, y };
-        label(obj.name, limb.x + 6, limb.y - 4);
+        if (eyepiece) diskLabel(obj.name, x, y, r);
+        else label(obj.name, x + r + 6, y - 4);
       }
     }
     if (sky.earth?.visible) {
