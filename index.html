@@ -31,6 +31,12 @@
         <p id="loading">Opening the cheese wheel…</p>
         <div class="view-badge" id="view-badge" hidden></div>
         <div class="zoom" id="zoom" hidden><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button></div>
+        <div class="zoom telescope" id="telescope" role="group" aria-label="Surface telescope" hidden>
+          <output id="magnification" aria-label="Telescope magnification">1×</output>
+          <button id="telescope-out" type="button" aria-label="Decrease telescope magnification" aria-disabled="true">−</button>
+          <button id="telescope-in" type="button" aria-label="Increase telescope magnification">+</button>
+          <button id="telescope-reset" type="button" aria-label="Reset telescope to 1×" aria-disabled="true">Reset</button>
+        </div>
         <div id="arrival-flag" class="arrival-flag" role="img" aria-label="Cheese flag planted on the ground" hidden>
           <svg viewBox="0 0 96 80" aria-hidden="true">
             <path d="M6 72L14 65L28 64L39 60L56 63L65 68L82 74L70 77L19 77Z" fill="#747079"/>

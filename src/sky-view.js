@@ -13,7 +13,8 @@ export function skyView(canvas) {
   if (!ctx) return null;
   function draw(sky, camera, options, width, height, dpi) {
     ctx.setTransform(dpi, 0, 0, dpi, 0, 0);
-    const f = height / (2 * Math.tan(32 * RAD));
+    // Keep the optical axis fixed; increase focal length to narrow the field of view.
+    const f = camera.magnification * height / (2 * Math.tan(32 * RAD));
     const az = camera.az * RAD, pitch = camera.alt * RAD;
     const forward = direction({ azimuth: camera.az, altitude: camera.alt });
     const right = [Math.cos(az), 0, -Math.sin(az)];

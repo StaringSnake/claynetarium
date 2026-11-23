@@ -18,6 +18,8 @@ Open <http://127.0.0.1:8000/>. Do not open the source HTML directly. `dist/` is 
 
 Use the date dial or a date field for large jumps, and the time-of-day dial or time field for finer changes. Edits pause playback. Drag the sky or use arrow keys to look around; in globe mode, drag to orbit and pinch, scroll, or use the zoom buttons. In pin mode, click/tap Earth or use the viewport's arrow keys and Enter to pin the center. The orbit overview compresses the separation and enlarges the Moon; the default globe mode does neither. The surface marker and its label are annotations, not physical objects.
 
+On Earth or the Moon, aim at an object before using the surface telescope’s **+** and **−** buttons to step through 1×, 2×, 4×, and 8×. **Reset** returns to 1× without moving your aim. Drag and arrow-key aiming become finer as you magnify. The telescope narrows the field of view without changing your location, time, playback, or what the horizon hides. A different observer location, including travel to another world, starts at 1×; lifting off into orbit and returning to the same location preserves the surface setting. Orbit zoom is separate.
+
 ## Code map
 
 - [`src/app.js`](src/app.js): browser entry point, controls, rendering, and travel.

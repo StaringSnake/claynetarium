@@ -17,7 +17,8 @@ const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const wrap = degrees => (degrees % 360 + 360) % 360;
 const motion = matchMedia('(prefers-reduced-motion: reduce)');
 const SPACE_SAMPLE_INTERVAL = 50; // Real milliseconds; input and flight still render on animation frames.
-const surface = { az: 180, alt: 12 };
+const surface = { az: 180, alt: 12, magnification: 1 };
+const MAX_MAGNIFICATION = 8;
 const cheese = { yaw: .38, pitch: -.02 };
 const orbit = { theta: 0, latitude: 0, distance: 4.3, focus: 'earth', overview: false };
 const options = { glare: 1, labels: true, lines: true };
@@ -94,6 +95,7 @@ function cancelLocation() {
 function selectSite(next, message = '') {
   if (lunarSite || ride) return;
   const firstSite = !site;
+  if (firstSite || site.lat !== next.lat || site.lon !== next.lon) setMagnification(1);
   // Capture the instant under the old clock before swapping civil rules.
   if (firstSite) {
     playback.startLive(Date.now(), performance.now());
@@ -236,6 +238,8 @@ function resize() {
 
 function viewControls() {
   const inSpace = mode === 'globe';
+  const showTelescope = Boolean(site && skyRenderer && !inSpace && !flight && !ride);
+  $('telescope').hidden = !showTelescope;
   $('rocket-ride').hidden = $('skip-ride').hidden = !ride;
   $('arrival-flag').hidden = !arrival || inSpace || Boolean(flight || ride);
   $('lunar-destinations').hidden = !travelOpen || !globe || Boolean(flight || ride || lunarSite) || pinning;
@@ -265,7 +269,8 @@ function viewControls() {
   $('view-help').textContent = ride ? 'Illustrative route, not to scale. The ride adds no simulation time.' :
     pinning ? 'Drag or use arrow keys to orbit. Tap Earth or press Enter to place a pin. Escape cancels.' :
     inSpace ? 'Drag or use arrow keys to orbit. Pinch, scroll or use the zoom buttons.' :
-      site ? 'Drag or use arrow keys to look around.' : 'Drag, swipe, or use arrow keys to look around inside the wheel.';
+      showTelescope ? 'Drag or use arrow keys to aim. Use the telescope buttons to magnify the center of the view.' :
+        site ? 'Drag or use arrow keys to look around.' : 'Drag, swipe, or use arrow keys to look around inside the wheel.';
   spaceCanvas.hidden = !inSpace && !flight && !ride;
   skyCanvas.hidden = !site || Boolean(ride) || (inSpace && !flight);
   cheeseCanvas.hidden = Boolean(site) || inSpace;
@@ -354,6 +359,7 @@ function cancelRide(message) {
 function finishRide(staticFlag = true) {
   advance();
   lunarSite = ride.destination;
+  setMagnification(1);
   ride = null; mode = 'surface'; arrival = staticFlag;
   globe?.resize(width, height, dpi);
   clock = civilClock(lunarSite ? 'UTC' : site.zone);
@@ -587,8 +593,9 @@ function rotate(dx, dy) {
     cheese.yaw = (cheese.yaw - dx * .007) % (2 * Math.PI);
     cheese.pitch = clamp(cheese.pitch + dy * .007, -1.4, 1.4);
   } else if (mode === 'surface') {
-    surface.az = wrap(surface.az - dx * .22);
-    surface.alt = clamp(surface.alt + dy * .22, -83, 83);
+    const sensitivity = .22 / surface.magnification;
+    surface.az = wrap(surface.az - dx * sensitivity);
+    surface.alt = clamp(surface.alt + dy * sensitivity, -83, 83);
   } else {
     orbit.theta -= dx * .007;
     orbit.latitude = clamp(orbit.latitude + dy * .007, -1.55, 1.55);
@@ -596,6 +603,27 @@ function rotate(dx, dy) {
   dirty = true;
   queuePreview();
 }
+function setMagnification(magnification) {
+  const next = clamp(magnification, 1, MAX_MAGNIFICATION);
+  if (next === surface.magnification) return;
+  surface.magnification = next;
+  $('magnification').value = `${next}×`;
+  // Keep focus on the active button when reaching a bound or resetting.
+  $('telescope-out').setAttribute('aria-disabled', String(next === 1));
+  $('telescope-in').setAttribute('aria-disabled', String(next === MAX_MAGNIFICATION));
+  $('telescope-reset').setAttribute('aria-disabled', String(next === 1));
+  dirty = true;
+}
+for (const [id, next] of [
+  ['telescope-out', () => surface.magnification / 2],
+  ['telescope-in', () => surface.magnification * 2],
+  ['telescope-reset', () => 1],
+]) {
+  $(id).addEventListener('click', () => {
+    if (!$('telescope').hidden) setMagnification(next());
+  });
+}
+
 function zoom(factor) {
   orbit.distance = clamp(orbit.distance * factor, orbit.focus === 'earth' ? 1.09 : .49, 150);
   dirty = true;
