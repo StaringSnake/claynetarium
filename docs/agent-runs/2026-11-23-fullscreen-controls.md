@@ -1,0 +1,40 @@
+# Run: Full-screen scene and collapsible controls
+
+Date: 2026-11-23
+Status: implementation and local verification for review
+
+## Objective and scope
+
+Implement [issue #4](https://github.com/StaringSnake/claynetarium/issues/4) after the telescope merge. Verified the live issue and fetched `origin/main`; work stayed in the normal checkout on `feature/fullscreen-controls`, based on `0fdd9045189fd2d93bf7b0a71096b62d5362c7b5`. Preserved unrelated harness and planning edits. No commit, push, deployment, rendering-art change, or app-wide rename.
+
+## Implementation and decisions
+
+- `index.html` and `styles.css`: the canvas fills the remaining app viewport without requesting browser fullscreen. The existing visual language stays; compact controls flank the scene, rather than pushing it down the page. On phones, panels become bounded sheets with independent vertical scrolling. Short viewports can scroll normally rather than clipping controls.
+- An in-flow accordion would resize the canvas and alter framing during panel toggles. A modal would block the surrounding scene and require focus trapping. A nonmodal overlay avoids both, at the cost of temporarily covering part of the scene.
+- `src/app.js`: **Location**, **Time**, **Travel**, and **View** are independent of simulation state; one panel opens at a time. Location opens by default on the first visit. Panel toggle, **Close**, and Escape dismiss the panel and return focus; actual travel and pin placement expose the scene and keep their mode-specific focus behavior.
+- **Telescope** and its **Magnification** slider stay accessible along the bottom edge on both surfaces. The circular mask follows the larger canvas. At the sampled 1220×900 desktop and 390×664 phone sizes, the aperture is about 700 and 374 CSS pixels across respectively, including the rim. The orbit scale badge and orbit zoom buttons have clearance beneath open panels. Panels can cover part of the scene while open; collapsing restores the unobstructed view.
+- `README.md` uses the same control names and explains panel dismissal, gesture scope, and telescope access. `tests/browser.test.js` adds desktop and phone layout acceptance and updates existing journeys to reach controls through the panels. Geometry-dependent samples stay tied to the same features in the taller canvas.
+
+## Review handoff
+
+- Final run on Node 24.20.0 and headless Chrome 158: `npm test` passed 16 tests; `LAYOUT_SCREENSHOTS=node_modules/.review/fullscreen-final npm run test:browser` built the static site and passed all 29 browser tests.
+- Original issue diff: `.git/info/fullscreen-issue-4-afcab2e49ff00fc00fe382c8ed850631b122725bbe6c59816422b5f653f0deb1.patch`. Visually inspected desktop and phone captures of the first visit, collapsed Earth and lunar views, expanded Travel/Time, telescope at 8×, orbit View with the scale badge, and no-WebGL fallback. Those original local images are no longer present under `node_modules/.review/fullscreen-final/`.
+- Calculated contrast using the existing palette: main/muted panel text 15.4:1/9.1:1, primary label 11.5:1, and focus accent against the panel 12.3:1. Screenshots are local Chromium captures, not evidence from physical hardware or assistive technology.
+- JavaScript syntax checks, ARIA/form ID reference checks, and diff whitespace checks passed. This vanilla JavaScript repo has no separate lint or type-check command.
+- Review the panel/scene focus boundary, touch scrolling versus scene gesture capture, and canvas resizing when modes change. The model, optics, and renderer are unchanged, but the larger drawing buffer may cost more to render on high-DPI hardware.
+
+## Review follow-up: canvas resizing and scene description
+
+- Reproduced duplicate work on the original #4 implementation in headless Chrome 158 at 390×664 CSS px and DPR 2. Six repeated observer notifications with no geometry change issued 12 Canvas 2D and 24 WebGL canvas dimension writes. The latter occurred because `setPixelRatio` already calls Three.js `setSize`, then the app called `setSize` again. Counts measure setter calls, not GPU allocations or elapsed render time.
+- Keep synchronous initial sizing, then batch resize observer, window, and DPR-query changes into one animation frame. Equal CSS dimensions and capped DPR skip buffer writes. Canvas 2D changes only the dimensions that differ; Three.js now sets dimensions and scale in a single call. Ride entry/exit still sizes the shared WebGL canvas explicitly, and during a ride the desktop buffer policy can change even if the scene geometry does not.
+- After the fix, six duplicate notifications and opening/closing all four panels each produced zero canvas dimension writes. A 390×664 portrait to 664×390 landscape emulation at raw DPR 3 used effective DPR 2 and wrote two dimensions per canvas (1328×480 for the 664×240 landscape scene). A burst of three intermediate widths applied only the final size. Effective DPR 2→1.5 at unchanged CSS size resized both buffers to 996×360 and repainted a paused sky. The CDP DPR override updates the reported DPR and query match, but can omit the native `change` event, so the focused test supplies that event if needed. This is headless event-path and buffer-size evidence, not physical-device, GPU timing, or refresh-rate evidence.
+- Chromium already computed the viewport's accessible description when referenced help was hidden inside View. The revised viewport references stable, visually hidden help outside that panel, with the same mode-specific message copied to visible View help. The Chromium AX tree checks open and closed View in the cheese, Earth surface, telescope, and orbit modes. Other engines and screen-reader announcements were not tested.
+- Revised verification on Node 24.20.0 and headless Chrome 158: `npm test` passed 16 tests, and `npm run test:browser` built the static site and passed all 31 browser tests. The cumulative review patch against `0fdd904` is `.git/info/fullscreen-issue-4-review-revision.patch`.
+
+## Independent acceptance
+
+- General and performance reviewers approved the final revision (inherited verdicts). The independent acceptance pass verified SHA-256 `65d08ec202ee1cc8cf79fed6915e9a81c6351066a681927c465f091bdf18c5d0` and applied that patch to an isolated Git index from `0fdd904`; all eight checkout files matched before this journal entry. No workflow, dependency, permission, CSP, or sensitive-data handling changes warranted a dedicated security review; that review was skipped.
+- Verdict: pass. Independently ran `npm test` (16 passed) and `npm run test:browser` (static build and 31 browser tests passed) with Node 24.20.0 and Chrome 158. JavaScript syntax, HTML ID references, and diff whitespace checks passed.
+- Against the live #4 criteria, the first-visit Location choices, Earth and lunar scenes, orbit and travel transitions, and no-WebGL sky/clock/manual-location fallback remained usable. Location, Time, Travel, and View retained the scene geometry; browser tests covered preserved aim and paused time, touch scrolling without changing telescope magnification, a 320 px narrow viewport, and the mode-specific Chromium accessibility description with View open or closed.
+- A separate headless Chrome 158 smoke check matched README names against rendered controls and confirmed that, on Earth and the Moon, the scene filled the space below the header and above the telescope controls (1220×716 CSS px on a 1220×900 desktop; 390×442 on an emulated 390×664 phone). All four panels restored visibly outlined keyboard focus to their toggles after Escape; the independently accessible circular eyepiece reached 32× with the labeled slider without changing scene geometry.
+- Buffer instrumentation counts canvas dimension writes, not GPU cost: unchanged notifications and panel toggles made zero writes on either canvas, while rotation made one width/height pair per canvas at capped DPR 2. The burst and DPR-only assertions checked frame coalescing and redraw of the paused sky. Physical devices, other browser engines, screen-reader announcements, and GPU timings were not tested.

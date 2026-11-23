@@ -41,8 +41,7 @@ export function globeView(canvas, onUnavailable, onSurfaceReady) {
   canvas.addEventListener('webglcontextlost', unavailable, { once: true });
 
   function resize(width, height, dpi) {
-    renderer.setPixelRatio(dpi);
-    renderer.setSize(width, height, false);
+    renderer.setDrawingBufferSize(width, height, dpi);
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
   }
