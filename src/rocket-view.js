@@ -1,6 +1,6 @@
 import * as T from 'three';
 import { radial } from './globe-view.js';
-import { clayFlag, cloud, landingTerrain, moonTexture, starField } from './rocket-set.js';
+import { clayFlag, cloud, landingTerrain, starField } from './rocket-set.js';
 import { cheeseAlien, clayPalette, clayRocket } from './rocket-models.js';
 
 const V = (x, y, z) => new T.Vector3(x, y, z);
@@ -20,14 +20,13 @@ function localFrame(normal) {
   return new T.Quaternion().setFromRotationMatrix(new T.Matrix4().makeBasis(right, normal, forward));
 }
 
-export function rocketView(renderer, earthMap) {
+export function rocketView(renderer, surfaces) {
   const scene = new T.Scene();
   scene.background = new T.Color('#0a1124');
   scene.add(starField());
   const lens = new T.PerspectiveCamera(44, 1, .12, 670);
-  const matteMoon = moonTexture();
-  const earth = body(-41, 19, earthMap, null, '#c5e8ff');
-  const moon = body(41, 6.9, matteMoon, matteMoon, '#c2b9b1');
+  const earth = body(-41, 19, surfaces.earth);
+  const moon = body(41, 6.9, surfaces.moon);
   const key = new T.DirectionalLight('#fff0d5', 2.5);
   key.position.set(-38, 55, 40);
   const rim = new T.DirectionalLight('#b1c8ff', 1.2);
@@ -51,8 +50,7 @@ export function rocketView(renderer, earthMap) {
   scene.add(shadow);
   let start, end, spaceAttitude;
 
-  function body(x, radius, map, bumpMap, color) {
-    const material = new T.MeshStandardMaterial({ map, bumpMap, bumpScale: .36, color, roughness: 1 });
+  function body(x, radius, material) {
     const globe = new T.Mesh(new T.SphereGeometry(radius, 96, 60), material);
     globe.position.x = x;
     scene.add(globe);
@@ -71,6 +69,7 @@ export function rocketView(renderer, earthMap) {
   }
 
   function begin(earthSite, moonSite, returning) {
+    surfaces.request(true);
     const earthNormal = radial(earthSite.lon * RAD, earthSite.lat * RAD);
     earth.globe.quaternion.setFromUnitVectors(earthNormal, laneNormal);
     // Illustrative tidal lock: lunar prime meridian faces roughly Earthward.

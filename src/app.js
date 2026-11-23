@@ -47,7 +47,7 @@ const cheeseRenderer = cheeseView(cheeseCanvas);
 const skyRenderer = skyView(skyCanvas);
 let globe;
 if (skyRenderer) {
-  try { globe = globeView(spaceCanvas, noGlobe); }
+  try { globe = globeView(spaceCanvas, noGlobe, () => { dirty = true; queuePreview(); }); }
   catch { globe = null; }
 }
 if (!globe) noGlobe();
@@ -320,7 +320,7 @@ function startRide(destination) {
     return;
   }
   try {
-    rocket ??= rocketView(globe.renderer, globe.earthMap);
+    rocket ??= rocketView(globe.renderer, globe.surfaces);
     rocket.begin(site, destination ?? lunarSite, !destination);
     rocket.resize(width, height, dpi);
     rocket.draw(0);

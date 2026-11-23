@@ -286,6 +286,172 @@ test('desktop project-subpath journey: time, sky, privacy, continuous flight, gl
   assert.deepEqual(requests, ['', 'styles.css', 'app.js'].map(path => ['GET', url + path]));
 });
 
+async function orbitFromCoordinates(page, latitude, longitude) {
+  await button(page, 'Pick a place').click();
+  await page.getByText('Enter coordinates', { exact: true }).click();
+  await page.getByLabel('Latitude').fill(latitude);
+  await page.getByLabel('Longitude').fill(longitude);
+  await button(page, 'Set coordinates').click();
+  await button(page, 'Pause').click();
+  await button(page, 'Lift off ↗').click();
+  await heading(page, 'Globe view');
+  await button(page, 'Zoom in').click();
+  await button(page, 'Zoom in').click();
+}
+
+function watchOrbitBake() {
+  const trace = window.orbitBake = { reads: 0, frameReads: 0, uploads: 0, firstDraw: null };
+  let inFrame = false, orbitContext;
+  window.orbitContextLost = () => orbitContext?.isContextLost();
+  const request = window.requestAnimationFrame;
+  window.requestAnimationFrame = callback => request(now => {
+    inFrame = true;
+    try { callback(now); } finally { inFrame = false; }
+  });
+  const read = CanvasRenderingContext2D.prototype.getImageData;
+  CanvasRenderingContext2D.prototype.getImageData = function (...args) {
+    if (!this.canvas.isConnected && this.canvas.width === 1024 && this.canvas.height === 512) {
+      trace.reads++;
+      if (inFrame) trace.frameReads++;
+      if (window.orbitBakeFault === 'readback') throw new Error('Injected atlas readback failure');
+      if (window.orbitBakeFault === 'context-loss') {
+        queueMicrotask(() => orbitContext.getExtension('WEBGL_lose_context').loseContext());
+      }
+    }
+    return read.apply(this, args);
+  };
+  const upload = WebGL2RenderingContext.prototype.texSubImage2D;
+  WebGL2RenderingContext.prototype.texSubImage2D = function (...args) {
+    if (args[4] === 1024 && args[5] === 512 && ArrayBuffer.isView(args[8])) trace.uploads++;
+    return upload.apply(this, args);
+  };
+  const draw = WebGL2RenderingContext.prototype.drawElements;
+  WebGL2RenderingContext.prototype.drawElements = function (...args) {
+    orbitContext ??= this;
+    trace.firstDraw ??= { reads: trace.reads, uploads: trace.uploads };
+    return draw.apply(this, args);
+  };
+}
+
+async function orbitPatch(page, left, top, width, height) {
+  await page.waitForFunction(() => window.orbitBake.uploads >= 2);
+  const png = await region(page).screenshot({ scale: 'css' });
+  return page.evaluate(async ({ source, left, top, width, height }) => {
+    const image = new Image(); image.src = `data:image/png;base64,${source}`; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+    const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+    const patch = ctx.getImageData(image.width / 2 + left, image.height / 2 + top, width, height).data;
+    const green = Array.from({ length: patch.length / 4 }, (_, i) => patch[4 * i + 1]);
+    const blue = green.map((g, i) => patch[4 * i + 2] - g);
+    return { greenMin: Math.min(...green), blueMargin: Math.min(...blue) };
+  }, { source: png.toString('base64'), left, top, width, height });
+}
+
+test('orbit Earth keeps the South Atlantic blue at the latitude of the antimeridian-crossing Fiji coast', async t => {
+  const { page } = await opened(t, { viewport: { width: 1220, height: 900 }, reducedMotion: 'reduce' }, watchOrbitBake);
+  await orbitFromCoordinates(page, '-16.6', '-18');
+
+  // A line from Fiji mistakenly drawn through Greenwich crosses this patch of open ocean.
+  const colors = await orbitPatch(page, -55, -7, 30, 14);
+  assert.ok(colors.greenMin > 25 && colors.blueMargin > 8,
+    `South Atlantic pixels should be rendered ocean blue: ${JSON.stringify(colors)}`);
+});
+
+test('orbit Earth keeps the Caspian water surrounded by land after unwrapping Eurasia', async t => {
+  const { page } = await opened(t, { viewport: { width: 1220, height: 900 }, reducedMotion: 'reduce' }, watchOrbitBake);
+  await orbitFromCoordinates(page, '41', '51');
+
+  // Sample just above the marker and farther to the west on the same latitude.
+  const water = await orbitPatch(page, -9, -14, 4, 4);
+  const land = await orbitPatch(page, -35, -16, 6, 6);
+  assert.ok(water.blueMargin > 8 && land.blueMargin < -8,
+    `Caspian water and surrounding land must differ: ${JSON.stringify({ water, land })}`);
+});
+
+test('first lift-off paints before preparing either clay atlas', async t => {
+  const { page } = await opened(t, { reducedMotion: 'reduce' }, watchOrbitBake);
+  await button(page, 'Try demo sky').click();
+  assert.equal(await page.evaluate(() => window.orbitBake.reads), 0);
+  await button(page, 'Lift off ↗').click();
+  await heading(page, 'Globe view');
+  await page.waitForFunction(() => window.orbitBake.uploads >= 2);
+  await button(page, 'Frame Moon').click();
+  await page.waitForFunction(() => window.orbitBake.uploads >= 4);
+
+  const trace = await page.evaluate(() => window.orbitBake);
+  assert.deepEqual(trace, { reads: 1, frameReads: 0, uploads: 4, firstDraw: { reads: 0, uploads: 0 } });
+});
+
+test('a ride before orbit draws immediately, then orbit reuses both uploaded clay atlases', { timeout: 35000 }, async t => {
+  const { page, errors, requests } = await opened(t, { viewport: { width: 1220, height: 900 } }, watchOrbitBake);
+  await manualSite(page, '23', '-26');
+  await button(page, 'Travel').click();
+  await button(page, 'Apollo 11 · Near side').click();
+  await rocket(page).waitFor({ state: 'visible' });
+  await page.waitForFunction(() => window.orbitBake.uploads >= 4, null, { timeout: 16000 });
+  assert.deepEqual(await page.evaluate(() => window.orbitBake), {
+    reads: 1, frameReads: 0, uploads: 4, firstDraw: { reads: 0, uploads: 0 },
+  });
+
+  await skipRide(page).click();
+  await heading(page, 'Lunar sky');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await button(page, 'Return to Earth').click();
+  await button(page, 'Lift off ↗').click();
+  await heading(page, 'Globe view');
+  await button(page, 'Frame Moon').click();
+  await region(page).screenshot();
+  assert.deepEqual(await page.evaluate(() => [window.orbitBake.reads, window.orbitBake.uploads]), [1, 4]);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(requests, ['', 'styles.css', 'app.js'].map(path => ['GET', url + path]));
+});
+
+test('the observer-free pin preview redraws itself when Earth relief is ready', async t => {
+  const { page } = await opened(t, {}, watchOrbitBake);
+  await button(page, 'Pick a place').click();
+  await button(page, 'Place globe pin').click();
+  await heading(page, 'Pick a globe location');
+  await page.waitForFunction(() => window.orbitBake.uploads >= 2);
+  const trace = await page.evaluate(() => window.orbitBake);
+  assert.deepEqual(trace, { reads: 1, frameReads: 0, uploads: 2, firstDraw: { reads: 0, uploads: 0 } });
+});
+
+test('a failed Earth atlas keeps orbit and pinning available while the Moon atlas finishes', async t => {
+  const { page, errors } = await opened(t, { reducedMotion: 'reduce' }, watchOrbitBake);
+  await page.evaluate(() => { window.orbitBakeFault = 'readback'; });
+  await button(page, 'Try demo sky').click();
+  await button(page, 'Pause').click();
+  await button(page, 'Lift off ↗').click();
+  await heading(page, 'Globe view');
+  await page.waitForFunction(() => window.orbitBake.reads === 1);
+
+  assert.equal(await page.evaluate(() => window.orbitContextLost()), false);
+  assert.equal(await button(page, 'Frame Moon').isVisible(), true);
+  assert.equal(await button(page, 'Frame Moon').isEnabled(), true);
+  await button(page, 'Frame Moon').click();
+  await page.waitForFunction(() => window.orbitBake.uploads === 2);
+  await button(page, 'Frame Earth').click();
+  await button(page, 'Place globe pin').click();
+  await region(page).press('Enter');
+  await page.getByText('Globe pin', { exact: true }).waitFor();
+  assert.deepEqual(await page.evaluate(() => [window.orbitBake.reads, window.orbitBake.uploads]), [1, 2]);
+  assert.deepEqual(errors, []);
+});
+
+test('actual WebGL context loss during atlas baking still disables orbit', async t => {
+  const { page, errors } = await opened(t, { reducedMotion: 'reduce' }, watchOrbitBake);
+  await page.evaluate(() => { window.orbitBakeFault = 'context-loss'; });
+  await button(page, 'Try demo sky').click();
+  await button(page, 'Lift off ↗').click();
+  await page.getByText(/The 3D globe needs WebGL 2/).waitFor();
+  await heading(page, 'Surface sky');
+
+  assert.equal(await page.evaluate(() => window.orbitContextLost()), true);
+  assert.equal(await button(page, 'Lift off ↗').isDisabled(), true);
+  assert.deepEqual(await page.evaluate(() => [window.orbitBake.reads, window.orbitBake.uploads]), [1, 0]);
+  assert.deepEqual(errors, []);
+});
+
 test('emulated phone: touch drag/pinch/orbit/return, no overflow, no stale location override', async t => {
   const { page, errors } = await opened(t, { ...devices['iPhone 13'], defaultBrowserType: undefined, reducedMotion: 'reduce' }, () => {
     window.locationRequests = [];
