@@ -31,11 +31,45 @@ const options = { glare: 1, labels: true, lines: true };
 const playback = createPlayback();
 let site = null, clock;
 let lunarSite = null, ride = null, arrival = false, lunarEvents;
-let rocket, travelOpen = false;
+let rocket;
 let sky, skySecond, space, spaceInstant, spaceSampleTime, shownDay, shownSecond;
 let pendingLocation = null, flight = null, mode = 'surface', pinning = false;
-let width, height, dpi, dirty = true;
+let width, height, dpi, desktopRideBuffer, dirty = true;
+let resizeQueued = false;
 let globePreview, previewFrame = null;
+
+const panelToggles = ['location-toggle', 'time-toggle', 'travel-toggle', 'view-toggle'].map($);
+const panelFor = toggle => $(toggle.getAttribute('aria-controls'));
+let openPanel = panelToggles[0];
+
+function showPanel(toggle, focus = true) {
+  const previous = openPanel;
+  if (previous) {
+    previous.setAttribute('aria-expanded', 'false');
+    panelFor(previous).hidden = true;
+  }
+  openPanel = toggle;
+  if (toggle) {
+    toggle.setAttribute('aria-expanded', 'true');
+    const panel = panelFor(toggle);
+    panel.hidden = false;
+    panel.scrollTop = 0;
+    if (focus) panel.querySelector('.panel-close').focus({ preventScroll: true });
+  } else if (focus && previous) {
+    (previous.hidden ? view : previous).focus({ preventScroll: true });
+  }
+}
+
+for (const toggle of panelToggles) {
+  toggle.addEventListener('click', () => showPanel(openPanel === toggle ? null : toggle));
+  panelFor(toggle).querySelector('.panel-close').addEventListener('click', () => showPanel(null));
+}
+document.querySelector('.observatory').addEventListener('keydown', event => {
+  if (openPanel && event.key === 'Escape' && !event.defaultPrevented) {
+    event.preventDefault();
+    showPanel(null);
+  }
+});
 
 function notice(id, message) {
   $(id).textContent = message;
@@ -126,12 +160,13 @@ function selectSite(next, message = '') {
   notice('location-status', message);
   setPin(false);
   if (firstSite) {
-    for (const id of ['site', 'coordinates', 'clock-panel', 'sky-panel', 'place-picker']) $(id).hidden = false;
+    for (const id of ['site', 'coordinates', 'time-toggle', 'sky-panel', 'place-picker']) $(id).hidden = false;
     for (const id of ['choose-site', 'pick-place', 'demo', 'cancel-place']) $(id).hidden = true;
-    $('main').classList.remove('no-observer');
+    $('location-toggle').classList.remove('primary');
+    if (openPanel === $('location-toggle')) showPanel(null, false);
     showCompatibility();
     updateReadouts();
-    view.focus();
+    if (!openPanel) view.focus({ preventScroll: true });
     requestAnimationFrame(tick);
   }
 }
@@ -232,14 +267,41 @@ function updateDirections() {
 }
 
 function resize() {
-  width = view.clientWidth; height = view.clientHeight;
+  const nextWidth = view.clientWidth, nextHeight = view.clientHeight;
+  const nextDpi = Math.min(devicePixelRatio || 1, 2);
+  const nextDesktopRideBuffer = innerWidth >= 1280 && innerHeight >= 720;
+  const sceneChanged = nextWidth !== width || nextHeight !== height || nextDpi !== dpi;
+  const rideBufferChanged = ride && nextDesktopRideBuffer !== desktopRideBuffer;
+  width = nextWidth; height = nextHeight; dpi = nextDpi; desktopRideBuffer = nextDesktopRideBuffer;
   if (!width || !height) return;
-  dpi = Math.min(devicePixelRatio || 1, 2);
-  skyCanvas.width = Math.round(width * dpi); skyCanvas.height = Math.round(height * dpi);
-  if (ride) rocket.resize(width, height, dpi);
+  if (!sceneChanged && !rideBufferChanged) return;
+  if (sceneChanged) {
+    const pixelsWide = Math.round(width * dpi), pixelsHigh = Math.round(height * dpi);
+    if (skyCanvas.width !== pixelsWide) skyCanvas.width = pixelsWide;
+    if (skyCanvas.height !== pixelsHigh) skyCanvas.height = pixelsHigh;
+  }
+  if (ride) rocket.resize(width, height, dpi, desktopRideBuffer);
   else globe?.resize(width, height, dpi);
   dirty = true;
   queuePreview();
+}
+
+function queueResize() {
+  if (resizeQueued) return;
+  resizeQueued = true;
+  requestAnimationFrame(() => {
+    resizeQueued = false;
+    resize();
+  });
+}
+
+function watchPixelRatio() {
+  // Match the raw DPR so a display/zoom change can be detected even when the CSS box doesn't change.
+  const query = matchMedia(`(resolution: ${devicePixelRatio || 1}dppx)`);
+  query.addEventListener('change', () => {
+    watchPixelRatio();
+    queueResize();
+  }, { once: true });
 }
 
 function viewControls() {
@@ -248,7 +310,7 @@ function viewControls() {
   setTelescope(showTelescope && telescopeActive, showTelescope);
   $('rocket-ride').hidden = $('skip-ride').hidden = !ride;
   $('arrival-flag').hidden = !arrival || inSpace || Boolean(flight || ride);
-  $('lunar-destinations').hidden = !travelOpen || !globe || Boolean(flight || ride || lunarSite) || pinning;
+  $('lunar-destinations').hidden = !globe || inSpace || Boolean(flight || ride || lunarSite);
   $('view-name').textContent = !site ? (inSpace ? 'Pick a globe location' : 'Inside the cheese wheel') :
     ride ? 'Rocket ride' : flight ? (flight.toSpace ? 'Lifting off' : 'Returning to surface') :
       inSpace ? 'Globe view' : lunarSite ? 'Lunar sky' : 'Surface sky';
@@ -257,27 +319,23 @@ function viewControls() {
   $('bearing').hidden = !site || Boolean(ride);
   $('flight').textContent = inSpace ? 'Return to surface ↓' : 'Lift off ↗';
   $('flight').disabled = !globe || Boolean(flight);
-  $('travel').hidden = !site || Boolean(ride) || inSpace;
-  $('travel').disabled = (!globe && !lunarSite) || Boolean(flight);
-  $('travel').textContent = lunarSite ? 'Return to Earth' : 'Travel';
-  if (lunarSite) {
-    $('travel').removeAttribute('aria-expanded');
-    $('travel').removeAttribute('aria-controls');
-  } else {
-    $('travel').setAttribute('aria-expanded', String(!$('lunar-destinations').hidden));
-    $('travel').setAttribute('aria-controls', 'lunar-destinations');
-  }
+  $('travel-toggle').hidden = !site || Boolean(flight || ride);
+  $('return-earth').hidden = !lunarSite;
+  if (openPanel?.hidden) showPanel(null);
   $('pin').disabled = !globe || Boolean(flight || ride);
   $('zoom').hidden = !inSpace || Boolean(flight || ride);
   $('orbit-tools').hidden = !site || !inSpace || Boolean(flight || ride);
   $('overview').setAttribute('aria-pressed', String(orbit.overview));
   $('view-badge').hidden = !site || !inSpace || Boolean(flight || ride);
-  $('view-help').textContent = ride ? 'Illustrative route, not to scale. The ride adds no simulation time.' :
+  const help = ride ? 'Illustrative route, not to scale. The ride adds no simulation time.' :
     pinning ? 'Drag or use arrow keys to orbit. Tap Earth or press Enter to place a pin. Escape cancels.' :
     inSpace ? 'Drag or use arrow keys to orbit. Pinch, scroll or use the zoom buttons.' :
       telescopeActive ? 'Drag or use arrow keys to aim. Scroll or pinch to zoom, or use the magnification slider.' :
         showTelescope ? 'Drag or use arrow keys to aim. Open Telescope to magnify the center of the view.' :
         site ? 'Drag or use arrow keys to look around.' : 'Drag, swipe, or use arrow keys to look around inside the wheel.';
+  $('view-help').textContent = $('panel-view-help').textContent = help;
+  $('pin-help').hidden = !pinning;
+  if (pinning) $('pin-help').textContent = help;
   spaceCanvas.hidden = !inSpace && !flight && !ride;
   skyCanvas.hidden = !site || Boolean(ride) || (inSpace && !flight);
   cheeseCanvas.hidden = Boolean(site) || inSpace;
@@ -311,7 +369,11 @@ function frameEarth() {
 
 function fly(toSpace, placePin = false) {
   if (!globe || flight) return;
-  travelOpen = false;
+  if (openPanel === $('travel-toggle') || (placePin && openPanel === $('location-toggle'))) {
+    const focusInPanel = panelFor(openPanel).contains(document.activeElement);
+    showPanel(null, false);
+    if (focusInPanel) view.focus({ preventScroll: true });
+  }
   if (toSpace) { orbit.overview = false; frameEarth(); }
   else setPin(false);
   flight = { toSpace, placePin, start: performance.now(), duration: motion.matches ? 0 : 1150 };
@@ -323,9 +385,9 @@ function startRide(destination) {
   if (pendingLocation) notice('location-status', '');
   cancelLocation();
   notice('travel-status', '');
+  showPanel(null, false);
   ride = { destination, elapsed: 0, lastFrame: null };
   setTelescope(false, false);
-  travelOpen = false;
   arrival = false;
   if (motion.matches || !globe) {
     if (!globe) notice('travel-status', '3D is unavailable. Returning to Earth without the ride.');
@@ -335,7 +397,7 @@ function startRide(destination) {
   try {
     rocket ??= rocketView(globe.renderer, globe.surfaces);
     rocket.begin(site, destination ?? lunarSite, !destination);
-    rocket.resize(width, height, dpi);
+    rocket.resize(width, height, dpi, desktopRideBuffer);
     rocket.draw(0);
   } catch (error) {
     console.error('Unable to start the rocket scene', error);
@@ -361,7 +423,7 @@ function cancelRide(message) {
   restoreSiteControls();
   notice('travel-status', message);
   viewControls();
-  $('travel').focus();
+  $('travel-toggle').focus({ preventScroll: true });
 }
 
 function finishRide(staticFlag = true) {
@@ -379,7 +441,7 @@ function finishRide(staticFlag = true) {
   $('site').textContent = station.name;
   $('coordinates').textContent = `${station.lat.toFixed(3)}°, ${station.lon.toFixed(3)}°`;
   $('title').textContent = lunarSite ? 'Lunar Sky' : 'Earth Sky';
-  $('clock-title').textContent = lunarSite ? 'Lunar time (UTC)' : 'Observer local time';
+  $('clock-context').textContent = lunarSite ? 'Lunar time (UTC)' : 'Observer local time';
   for (const id of ['earth-notes', 'solar-note', 'glare-controls']) $(id).hidden = Boolean(lunarSite);
   $('lunar-notes').hidden = !lunarSite;
   restoreSiteControls();
@@ -481,6 +543,7 @@ $('locate').addEventListener('click', () => {
 function closeGlobePreview() {
   if (site || !globePreview) return;
   globePreview = null; mode = 'surface'; setPin(false);
+  showPanel($('location-toggle'), false);
   $('pin').focus();
 }
 function showPicker(open) {
@@ -547,13 +610,7 @@ for (const key of ['labels', 'lines']) $(key).addEventListener('change', event =
 $('directions').parentElement.addEventListener('toggle', event => { if (event.target.open) updateDirections(); });
 
 $('flight').addEventListener('click', () => fly(mode === 'surface'));
-$('travel').addEventListener('click', () => {
-  if (lunarSite) startRide(null);
-  else {
-    travelOpen = !travelOpen;
-    viewControls();
-  }
-});
+$('return-earth').addEventListener('click', () => startRide(null));
 $('skip-ride').addEventListener('click', () => { if (ride) finishRide(); });
 for (const [id, destination] of Object.entries(lunarSites)) {
   $(`land-${id}`).addEventListener('click', () => startRide(destination));
@@ -582,7 +639,8 @@ $('pin').addEventListener('click', () => {
     if (orbit.focus !== 'earth') frameEarth();
     setPin(!pinning);
   }
-  view.scrollIntoView({ block: 'nearest' }); view.focus({ preventScroll: true });
+  showPanel(null, false);
+  view.focus({ preventScroll: true });
 });
 $('overview').addEventListener('click', () => {
   orbit.overview = !orbit.overview; frameEarth(); viewControls();
@@ -692,7 +750,8 @@ view.addEventListener('keydown', event => {
   if (event.defaultPrevented) return;
   const keys = { ArrowLeft: [28, 0], ArrowRight: [-28, 0], ArrowUp: [0, 28], ArrowDown: [0, -28] };
   if (Object.hasOwn(keys, event.key)) { event.preventDefault(); rotate(...keys[event.key]); }
-  if (event.key === 'Escape') {
+  if (event.key === 'Escape' && pinning) {
+    event.preventDefault();
     if (!site) closeGlobePreview();
     else setPin(false);
   }
@@ -757,5 +816,7 @@ view.addEventListener('pointerup', event => {
 for (const type of ['pointercancel', 'lostpointercapture']) view.addEventListener(type, event => pointers.delete(event.pointerId));
 
 listCities(); viewControls(); resize();
-new ResizeObserver(resize).observe(view);
+new ResizeObserver(queueResize).observe(view);
+window.addEventListener('resize', queueResize);
+watchPixelRatio();
 $('loading').hidden = true;

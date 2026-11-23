@@ -2,6 +2,10 @@
 
 A static planetarium for looking up from Earth and exploring the Earth–Moon system. Each visit starts inside a fictional wheel of cheese. Drag, swipe, or focus the view and use the arrow keys to look around. To see the real sky, choose **Use my location**, **Pick a place** (search built-in cities, enter coordinates, or place a globe pin), or **Try demo sky** (Reykjavík, no location request). If location is denied or unavailable, you can still pick a place or try the demo.
 
+## Scene and controls
+
+The scene fills the available app viewport without entering browser fullscreen. **Location** opens on the first visit. Once you choose a site, use **Location** to change it, **Time** to set the clock or control playback, **Travel** to lift off, land on the Moon, or return, and **View** for gesture help, sky settings, and orbit framing. Panels open one at a time on the right on desktop or in a scrollable sheet on phones. Select the same toggle again, choose **Close**, or press Escape to tuck away a panel without resetting the scene. Closing returns keyboard focus to the corresponding toggle.
+
 The first site opens the sky at the current instant. Later site changes keep the simulation instant, and a reload returns to the cheese. Location and searches are neither sent by the app nor stored between visits. If you explicitly request location, the browser or OS may use its own location service.
 
 ## Run locally
@@ -18,9 +22,9 @@ Open <http://127.0.0.1:8000/>. Do not open the source HTML directly. `dist/` is 
 
 Use the date dial or a date field for large jumps, and the time-of-day dial or time field for finer changes. Edits pause playback. Drag the sky or use arrow keys to look around; in globe mode, drag to orbit and pinch, scroll, or use the zoom buttons. In pin mode, click/tap Earth or use the viewport's arrow keys and Enter to pin the center. The orbit overview compresses the separation and enlarges the Moon; the default globe mode does neither. The surface marker and its label are annotations, not physical objects.
 
-On Earth or the Moon, choose **Telescope** beneath the sky to look through the eyepiece. Scroll up over the scene or spread two fingers to zoom in; scroll down or pinch inward to zoom out. Magnification changes continuously from 1× to 32×. The center stays aimed at the same spot; the lens stretches the view near the rim. You can also focus the **Magnification** slider and use the arrow keys (or Home and End to reach the limits). Drag with one finger, use the mouse, or focus the scene and use arrow keys to aim. After a pinch, lift both fingers before starting a new drag.
+On Earth or the Moon, choose **Telescope** along the bottom edge to open the circular eyepiece. No panel is needed. Scroll up over the scene or spread two fingers to zoom in; scroll down or pinch inward to zoom out. Magnification changes continuously from 1× to 32×. The center stays aimed at the same spot; the lens stretches the view near the rim. You can also focus the **Magnification** slider and use the arrow keys (or Home and End to reach the limits). Drag with one finger, use the mouse, or focus the scene and use arrow keys to aim. After a pinch, lift both fingers before starting a new drag.
 
-Trackpad pinch events sent as Ctrl+scroll zoom the telescope only over the active scene, not over its controls. Elsewhere Ctrl+scroll stays with the browser, and Command/Meta+scroll is never used for telescope zoom. Outside the telescope, scrolling over the surface sky scrolls the page; orbit zoom is separate.
+Trackpad pinch events sent as Ctrl+scroll zoom the telescope only over the active scene, not over its controls or an open panel. Scroll or swipe inside a panel to reach its controls without changing the view. Elsewhere Ctrl+scroll stays with the browser, and Command/Meta+scroll is never used for telescope zoom. Outside the telescope, scrolling over the surface sky does not zoom it; orbit zoom is separate.
 
 **Exit telescope** (or Escape while the scene or telescope controls have focus) restores the normal 1× view without moving your aim. If the telescope becomes unavailable while one of its controls has focus, focus moves to the scene or a ride control. Reopening at the same observer recalls your zoom, even after an orbit round trip. Changing observer location or traveling to another world closes the eyepiece and resets its zoom to 1×. The telescope does not change time, playback, or what the horizon hides.
 

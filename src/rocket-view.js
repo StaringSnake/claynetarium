@@ -82,15 +82,14 @@ export function rocketView(renderer, surfaces) {
     effects.quaternion.copy(end.attitude);
   }
 
-  function resize(width, height, dpi) {
+  function resize(width, height, dpi, desktopBuffer) {
     // Preserve CSS aspect, but give a desktop ride at least 720 physical rows.
     // Narrow viewports use a capped scale instead of inflating to desktop targets.
-    const desired = innerWidth >= 1280 && innerHeight >= 720 ? Math.max(dpi, 1280 / width, 720 / height) : Math.min(dpi, 1.5);
+    const desired = desktopBuffer ? Math.max(dpi, 1280 / width, 720 / height) : Math.min(dpi, 1.5);
     const gpu = renderer.getContext();
     const [maxWidth, maxHeight] = gpu.getParameter(gpu.MAX_VIEWPORT_DIMS) ?? [width, height];
     const scale = Math.min(desired, maxWidth / width, maxHeight / height, 3072 / width, 2160 / height);
-    renderer.setPixelRatio(scale);
-    renderer.setSize(width, height, false);
+    renderer.setDrawingBufferSize(width, height, scale);
     lens.aspect = width / height;
     lens.updateProjectionMatrix();
   }

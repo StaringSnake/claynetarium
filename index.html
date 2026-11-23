@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
   <link rel="icon" href="data:,">
@@ -11,68 +11,27 @@
 </head>
 <body>
   <header class="masthead"><span class="emblem" aria-hidden="true"></span> PLANETARIUM <span class="edition">FIELD ATLAS / 01</span></header>
-  <main id="main" class="no-observer">
-    <section class="intro" aria-labelledby="title">
-      <div><p class="eyebrow">OBSERVER STATION</p><h1 id="title">Earth Sky</h1></div>
-      <p>Explore the sky from Earth, then lift off to see our world and its Moon.</p>
-    </section>
-
+  <main>
+    <h1 id="title" class="sr-only">Earth Sky</h1>
     <section class="observatory" aria-labelledby="view-name">
       <div class="view-head">
-        <h2 id="view-name">Inside the cheese wheel</h2><span id="bearing" class="muted" hidden></span>
-        <button id="flight" type="button" hidden disabled>Lift off ↗</button>
-        <button id="travel" class="primary" type="button" aria-expanded="false" aria-controls="lunar-destinations" hidden>Travel</button>
-        <button id="skip-ride" class="primary" type="button" hidden>Skip ride</button>
-        <button id="close-globe" type="button" hidden>Back to cheese</button>
-      </div>
-      <div id="viewport" class="viewport" tabindex="0" role="region" aria-label="Planetarium view" aria-describedby="view-help">
-        <canvas id="space" aria-hidden="true" hidden></canvas><canvas id="sky" aria-hidden="true" hidden></canvas>
-        <canvas id="cheese" aria-hidden="true"></canvas>
-        <p id="loading">Opening the cheese wheel…</p>
-        <div class="view-badge" id="view-badge" hidden></div>
-        <div class="zoom" id="zoom" hidden><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button></div>
-        <div id="arrival-flag" class="arrival-flag" role="img" aria-label="Cheese flag planted on the ground" hidden>
-          <svg viewBox="0 0 96 80" aria-hidden="true">
-            <path d="M6 72L14 65L28 64L39 60L56 63L65 68L82 74L70 77L19 77Z" fill="#747079"/>
-            <path d="M6 72L30 73L47 71L58 72L82 74L70 77L19 77Z" fill="#46414b"/>
-            <ellipse cx="37" cy="68" rx="11" ry="3" fill="#46414b"/>
-            <path d="M38 67L34 13" stroke="#efe2c9" stroke-width="4" stroke-linecap="round"/>
-            <path d="M34 14Q50 8 79 28L38 49Z" fill="#f1bd5d"/>
-            <path d="M38 49L79 28L77 34L39 54Z" fill="#ac713c"/>
-            <g fill="#b7783d"><circle cx="46" cy="24" r="4"/><circle cx="56" cy="33" r="3"/><circle cx="44" cy="40" r="2.5"/></g>
-          </svg>
+        <div class="view-heading">
+          <h2 id="view-name">Inside the cheese wheel</h2><span id="bearing" class="muted" hidden></span>
         </div>
-      </div>
-      <div class="view-foot">
-        <p id="rocket-ride" class="muted" hidden><strong id="ride-phase"></strong> · <span id="ride-route"></span></p>
-        <p class="muted" id="view-help">Drag, swipe, or use arrow keys to look around inside the wheel.</p>
-        <div class="telescope" id="telescope" role="group" aria-label="Surface telescope" hidden>
-          <button class="primary" id="telescope-toggle" type="button" aria-expanded="false" aria-controls="telescope-controls">Telescope</button>
-          <div class="telescope-controls" id="telescope-controls" hidden>
-            <label for="telescope-range">Magnification</label><span id="magnification" aria-hidden="true">1×</span>
-            <input id="telescope-range" type="range" min="1" max="32" step="0.01" value="1" aria-valuetext="1×">
-          </div>
-        </div>
-        <p class="notice" id="pin-status" role="status" hidden></p>
-        <p class="notice" id="travel-status" role="status" hidden></p>
-        <div class="actions" id="orbit-tools" hidden>
-          <button id="overview" type="button" aria-pressed="false">Orbit overview</button>
-          <button id="earth-focus" type="button">Frame Earth</button>
-          <button id="moon-focus" type="button">Frame Moon</button>
-        </div>
-        <div id="lunar-destinations" hidden>
-          <p class="muted">Choose a guided lunar landing</p>
-          <div class="actions">
-            <button id="land-apollo" type="button">Apollo 11 · Near side</button>
-            <button id="land-far" type="button">Far-side equator</button>
+        <div class="view-actions">
+          <button id="skip-ride" class="primary" type="button" hidden>Skip ride</button>
+          <button id="close-globe" type="button" hidden>Back to cheese</button>
+          <div class="actions" role="group" aria-label="Scene controls">
+            <button id="location-toggle" class="primary" type="button" aria-controls="location-panel" aria-expanded="true">Location</button>
+            <button id="time-toggle" type="button" aria-controls="clock-panel" aria-expanded="false" hidden>Time</button>
+            <button id="travel-toggle" type="button" aria-controls="travel-panel" aria-expanded="false" hidden>Travel</button>
+            <button id="view-toggle" type="button" aria-controls="view-panel" aria-expanded="false">View</button>
           </div>
         </div>
       </div>
-    </section>
-
-    <div class="instruments">
-      <section class="panel" aria-labelledby="site-title">
-        <p class="eyebrow">01 / OBSERVER</p><h2 id="site-title">Location</h2>
+      <div class="stage">
+      <section class="panel" id="location-panel" aria-labelledby="site-title">
+        <div class="panel-head"><h2 id="site-title">Location</h2><button type="button" class="panel-close" aria-label="Close Location">Close</button></div>
         <p id="choose-site">No location selected. Choose how to leave the cheese for an Earth sky.</p>
         <p class="readout" id="site" hidden></p>
         <p class="muted" id="coordinates" hidden></p>
@@ -82,7 +41,6 @@
           <button id="demo" type="button">Try demo sky</button>
         </div>
         <p id="location-status" class="notice" role="status" hidden></p>
-        <p class="notice" id="compatibility" role="status" hidden></p>
         <div id="place-picker" hidden>
           <div class="actions">
             <button id="pin" type="button" aria-pressed="false" disabled>Place globe pin</button>
@@ -107,7 +65,8 @@
       </section>
 
       <section class="panel" id="clock-panel" aria-labelledby="clock-title" hidden>
-        <p class="eyebrow">02 / SIMULATION</p><h2 id="clock-title">Observer local time</h2>
+        <div class="panel-head"><h2 id="clock-title">Time</h2><button type="button" class="panel-close" aria-label="Close Time">Close</button></div>
+        <p class="muted" id="clock-context">Observer local time</p>
         <time class="readout" id="local-clock"></time>
         <p class="muted" id="zone"></p>
         <div class="actions">
@@ -125,8 +84,31 @@
         <p id="clock-status" class="notice" role="status" hidden></p>
       </section>
 
-      <section class="panel" id="sky-panel" aria-labelledby="sky-title" hidden>
-        <p class="eyebrow">03 / FIELD NOTES</p><h2 id="sky-title">Sky conditions</h2>
+      <section class="panel" id="travel-panel" aria-labelledby="travel-title" hidden>
+        <div class="panel-head"><h2 id="travel-title">Travel</h2><button type="button" class="panel-close" aria-label="Close Travel">Close</button></div>
+        <div class="actions">
+          <button id="flight" type="button" hidden disabled>Lift off ↗</button>
+          <button id="return-earth" type="button" hidden>Return to Earth</button>
+        </div>
+        <div id="lunar-destinations" hidden>
+          <p class="muted">Choose a guided lunar landing</p>
+          <div class="actions">
+            <button id="land-apollo" type="button">Apollo 11 · Near side</button>
+            <button id="land-far" type="button">Far-side equator</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="view-panel" aria-labelledby="view-title" hidden>
+        <div class="panel-head"><h2 id="view-title">View</h2><button type="button" class="panel-close" aria-label="Close View">Close</button></div>
+        <p class="muted" id="panel-view-help">Drag, swipe, or use arrow keys to look around inside the wheel.</p>
+        <div class="actions" id="orbit-tools" hidden>
+          <button id="overview" type="button" aria-pressed="false">Orbit overview</button>
+          <button id="earth-focus" type="button">Frame Earth</button>
+          <button id="moon-focus" type="button">Frame Moon</button>
+        </div>
+        <div id="sky-panel" hidden>
+        <h3>Sky conditions</h3>
         <div id="glare-controls"><label for="dimmer">Daylight glare</label><input id="dimmer" type="range" min="0" max="100" value="100"></div>
         <div class="checks">
           <label><input id="labels" type="checkbox" checked> Object labels</label>
@@ -148,11 +130,47 @@
           <p class="muted">UTC estimates for the Sun’s upper edge at the level horizon, without refraction.</p>
         </div>
         <details><summary>Object directions</summary><p class="muted">Azimuth clockwise from north; altitude above the horizon.</p><ul id="directions"></ul></details>
+        </div>
+        <footer><p>Location and searches stay in this tab. Use a level horizon when comparing solar events outside.</p><p>Map: <a href="./licenses/world-atlas.txt">Natural Earth / World Atlas</a>. Ephemeris: <a href="./licenses/astronomy-engine.txt">Astronomy Engine</a>.</p></footer>
       </section>
-    </div>
-    <footer><p>Location and searches stay in this tab. Use a level horizon when comparing solar events outside.</p><p>Map: <a href="./licenses/world-atlas.txt">Natural Earth / World Atlas</a>. Ephemeris: <a href="./licenses/astronomy-engine.txt">Astronomy Engine</a>.</p></footer>
+
+      <p class="sr-only" id="view-help">Drag, swipe, or use arrow keys to look around inside the wheel.</p>
+      <div id="viewport" class="viewport" tabindex="0" role="region" aria-label="Planetarium view" aria-describedby="view-help">
+        <canvas id="space" aria-hidden="true" hidden></canvas><canvas id="sky" aria-hidden="true" hidden></canvas>
+        <canvas id="cheese" aria-hidden="true"></canvas>
+        <p id="loading" role="status">Opening the cheese wheel…</p>
+        <div class="view-badge" id="view-badge" hidden></div>
+        <div class="zoom" id="zoom" hidden><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button></div>
+        <div id="arrival-flag" class="arrival-flag" role="img" aria-label="Cheese flag planted on the ground" hidden>
+          <svg viewBox="0 0 96 80" aria-hidden="true">
+            <path d="M6 72L14 65L28 64L39 60L56 63L65 68L82 74L70 77L19 77Z" fill="#747079"/>
+            <path d="M6 72L30 73L47 71L58 72L82 74L70 77L19 77Z" fill="#46414b"/>
+            <ellipse cx="37" cy="68" rx="11" ry="3" fill="#46414b"/>
+            <path d="M38 67L34 13" stroke="#efe2c9" stroke-width="4" stroke-linecap="round"/>
+            <path d="M34 14Q50 8 79 28L38 49Z" fill="#f1bd5d"/>
+            <path d="M38 49L79 28L77 34L39 54Z" fill="#ac713c"/>
+            <g fill="#b7783d"><circle cx="46" cy="24" r="4"/><circle cx="56" cy="33" r="3"/><circle cx="44" cy="40" r="2.5"/></g>
+          </svg>
+        </div>
+      </div>
+      </div>
+      <div class="view-foot">
+        <p id="rocket-ride" class="muted" hidden><strong id="ride-phase"></strong> · <span id="ride-route"></span></p>
+        <p class="muted" id="pin-help" hidden></p>
+        <p class="notice" id="pin-status" role="status" hidden></p>
+        <p class="notice" id="travel-status" role="status" hidden></p>
+        <p class="notice" id="compatibility" role="status" hidden></p>
+        <div class="telescope" id="telescope" role="group" aria-label="Surface telescope" hidden>
+          <button class="primary" id="telescope-toggle" type="button" aria-expanded="false" aria-controls="telescope-controls">Telescope</button>
+          <div class="telescope-controls" id="telescope-controls" hidden>
+            <label for="telescope-range">Magnification</label><span id="magnification" aria-hidden="true">1×</span>
+            <input id="telescope-range" type="range" min="1" max="32" step="0.01" value="1" aria-valuetext="1×">
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
-  <noscript><p>This planetarium needs JavaScript to compute and display the sky.</p></noscript>
+  <noscript><p class="script-notice">This planetarium needs JavaScript to compute and display the sky.</p></noscript>
   <script type="module" src="./app.js"></script>
 </body>
 </html>
