@@ -17,7 +17,14 @@ const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const wrap = degrees => (degrees % 360 + 360) % 360;
 const motion = matchMedia('(prefers-reduced-motion: reduce)');
 const SPACE_SAMPLE_INTERVAL = 50; // Real milliseconds; input and flight still render on animation frames.
-const surface = { az: 180, alt: 12 };
+const surface = { az: 180, alt: 12, magnification: 1 };
+const WHEEL_MAGNIFICATION_PER_PIXEL = .005;
+const PINCH_MAGNIFICATION_PER_PIXEL = .02;
+const telescope = $('telescope'), telescopeToggle = $('telescope-toggle'), telescopeRange = $('telescope-range');
+const telescopeControls = $('telescope-controls');
+let telescopeActive = false, telescopeMagnification = 1;
+const pointers = new Map();
+let dragged = false, telescopePinch = null;
 const cheese = { yaw: .38, pitch: -.02 };
 const orbit = { theta: 0, latitude: 0, distance: 4.3, focus: 'earth', overview: false };
 const options = { glare: 1, labels: true, lines: true };
@@ -94,6 +101,7 @@ function cancelLocation() {
 function selectSite(next, message = '') {
   if (lunarSite || ride) return;
   const firstSite = !site;
+  if (firstSite || site.lat !== next.lat || site.lon !== next.lon) resetTelescope();
   // Capture the instant under the old clock before swapping civil rules.
   if (firstSite) {
     playback.startLive(Date.now(), performance.now());
@@ -236,6 +244,8 @@ function resize() {
 
 function viewControls() {
   const inSpace = mode === 'globe';
+  const showTelescope = Boolean(site && skyRenderer && !inSpace && !flight && !ride);
+  setTelescope(showTelescope && telescopeActive, showTelescope);
   $('rocket-ride').hidden = $('skip-ride').hidden = !ride;
   $('arrival-flag').hidden = !arrival || inSpace || Boolean(flight || ride);
   $('lunar-destinations').hidden = !travelOpen || !globe || Boolean(flight || ride || lunarSite) || pinning;
@@ -265,7 +275,9 @@ function viewControls() {
   $('view-help').textContent = ride ? 'Illustrative route, not to scale. The ride adds no simulation time.' :
     pinning ? 'Drag or use arrow keys to orbit. Tap Earth or press Enter to place a pin. Escape cancels.' :
     inSpace ? 'Drag or use arrow keys to orbit. Pinch, scroll or use the zoom buttons.' :
-      site ? 'Drag or use arrow keys to look around.' : 'Drag, swipe, or use arrow keys to look around inside the wheel.';
+      telescopeActive ? 'Drag or use arrow keys to aim. Scroll or pinch to zoom, or use the magnification slider.' :
+        showTelescope ? 'Drag or use arrow keys to aim. Open Telescope to magnify the center of the view.' :
+        site ? 'Drag or use arrow keys to look around.' : 'Drag, swipe, or use arrow keys to look around inside the wheel.';
   spaceCanvas.hidden = !inSpace && !flight && !ride;
   skyCanvas.hidden = !site || Boolean(ride) || (inSpace && !flight);
   cheeseCanvas.hidden = Boolean(site) || inSpace;
@@ -312,6 +324,7 @@ function startRide(destination) {
   cancelLocation();
   notice('travel-status', '');
   ride = { destination, elapsed: 0, lastFrame: null };
+  setTelescope(false, false);
   travelOpen = false;
   arrival = false;
   if (motion.matches || !globe) {
@@ -354,6 +367,7 @@ function cancelRide(message) {
 function finishRide(staticFlag = true) {
   advance();
   lunarSite = ride.destination;
+  resetTelescope();
   ride = null; mode = 'surface'; arrival = staticFlag;
   globe?.resize(width, height, dpi);
   clock = civilClock(lunarSite ? 'UTC' : site.zone);
@@ -420,7 +434,7 @@ function draw(real) {
         if (badge.textContent !== text) badge.textContent = text;
       }
     }
-    if (progress < 1) skyRenderer?.draw(sky, surface, options, width, height, dpi);
+    if (progress < 1) skyRenderer?.draw(sky, surface, options, width, height, dpi, telescopeActive);
     const heading = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(surface.az / 45) % 8];
     $('bearing').textContent = mode === 'surface' && !flight ? `${heading} ${Math.round(surface.az) % 360}° · ${Math.round(surface.alt)}° altitude` : '';
     skyCanvas.style.opacity = String(1 - clamp((progress - .08) / .72, 0, 1));
@@ -587,8 +601,9 @@ function rotate(dx, dy) {
     cheese.yaw = (cheese.yaw - dx * .007) % (2 * Math.PI);
     cheese.pitch = clamp(cheese.pitch + dy * .007, -1.4, 1.4);
   } else if (mode === 'surface') {
-    surface.az = wrap(surface.az - dx * .22);
-    surface.alt = clamp(surface.alt + dy * .22, -83, 83);
+    const sensitivity = .22 / surface.magnification;
+    surface.az = wrap(surface.az - dx * sensitivity);
+    surface.alt = clamp(surface.alt + dy * sensitivity, -83, 83);
   } else {
     orbit.theta -= dx * .007;
     orbit.latitude = clamp(orbit.latitude + dy * .007, -1.55, 1.55);
@@ -596,6 +611,62 @@ function rotate(dx, dy) {
   dirty = true;
   queuePreview();
 }
+function setTelescope(active, available = !telescope.hidden) {
+  const hiding = !available ? telescope : !active ? telescopeControls : null;
+  const focusWillBeHidden = hiding?.contains(document.activeElement);
+  telescope.hidden = !available;
+  if (telescopeActive !== active) {
+    for (const id of pointers.keys()) {
+      if (view.hasPointerCapture(id)) view.releasePointerCapture(id);
+    }
+    pointers.clear();
+    telescopeActive = active;
+    surface.magnification = active ? telescopeMagnification : 1;
+    view.classList.toggle('eyepiece', active);
+    telescopeToggle.classList.toggle('primary', !active);
+    telescopeToggle.textContent = active ? 'Exit telescope' : 'Telescope';
+    telescopeToggle.setAttribute('aria-expanded', String(active));
+    telescopeControls.hidden = !active;
+    dirty = true;
+  }
+  if (focusWillBeHidden) (available ? telescopeToggle : view).focus();
+}
+
+function setMagnification(value) {
+  telescopeMagnification = clamp(value, 1, Number(telescopeRange.max));
+  // The native step rounds the slider, not the focal length used for projection.
+  const rounded = Number(telescopeMagnification.toFixed(2));
+  const text = `${rounded}×`;
+  telescopeRange.value = rounded;
+  telescopeRange.setAttribute('aria-valuetext', text);
+  $('magnification').textContent = text;
+  if (!telescopeActive || surface.magnification === telescopeMagnification) return;
+  surface.magnification = telescopeMagnification;
+  dirty = true;
+}
+
+function resetTelescope() {
+  setTelescope(false);
+  setMagnification(1);
+}
+
+telescopeToggle.addEventListener('click', () => {
+  if (telescope.hidden) return;
+  setTelescope(!telescopeActive);
+  viewControls();
+});
+telescopeRange.addEventListener('input', () => {
+  if (telescopeActive) setMagnification(telescopeRange.valueAsNumber);
+});
+function escapeTelescope(event) {
+  if (!telescopeActive || event.key !== 'Escape' || event.defaultPrevented) return;
+  event.preventDefault();
+  setTelescope(false);
+  viewControls();
+  telescopeToggle.focus();
+}
+telescope.addEventListener('keydown', escapeTelescope);
+
 function zoom(factor) {
   orbit.distance = clamp(orbit.distance * factor, orbit.focus === 'earth' ? 1.09 : .49, 150);
   dirty = true;
@@ -604,11 +675,21 @@ function zoom(factor) {
 $('zoom-in').addEventListener('click', () => zoom(.77));
 $('zoom-out').addEventListener('click', () => zoom(1.3));
 view.addEventListener('wheel', event => {
-  if (mode !== 'globe' || flight || ride) return;
-  event.preventDefault(); zoom(Math.exp(clamp(event.deltaY * .002, -1, 1)));
+  if (flight || ride) return;
+  // Browsers send trackpad pinch as Ctrl+wheel. Meta is not that signal.
+  if (telescopeActive && event.target === view && !event.metaKey && !event.altKey && !event.shiftKey) {
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? view.clientHeight : 1;
+    if (!event.cancelable || !event.deltaY) return;
+    event.preventDefault();
+    setMagnification(telescopeMagnification - event.deltaY * unit * WHEEL_MAGNIFICATION_PER_PIXEL);
+  } else if (mode === 'globe' && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault(); zoom(Math.exp(clamp(event.deltaY * .002, -1, 1)));
+  }
 }, { passive: false });
 view.addEventListener('keydown', event => {
   if (event.target !== view || flight || ride) return;
+  escapeTelescope(event);
+  if (event.defaultPrevented) return;
   const keys = { ArrowLeft: [28, 0], ArrowRight: [-28, 0], ArrowUp: [0, 28], ArrowDown: [0, -28] };
   if (Object.hasOwn(keys, event.key)) { event.preventDefault(); rotate(...keys[event.key]); }
   if (event.key === 'Escape') {
@@ -627,33 +708,48 @@ function placePin(x, y) {
   else notice('pin-status', 'No Earth surface at that point. Tap Earth to place the pin.');
 }
 
-const pointers = new Map();
-let dragged = false;
 view.addEventListener('pointerdown', event => {
   if (flight || ride || event.target !== view || event.button !== 0 || pointers.size >= 2) return;
-  if (!pointers.size) dragged = false;
-  else dragged = true;
+  const point = { x: event.clientX, y: event.clientY, type: event.pointerType };
+  if (!pointers.size) {
+    dragged = false;
+    telescopePinch = null;
+  } else {
+    const [first] = pointers.values();
+    if (telescopeActive) {
+      if (point.type !== 'touch' || first.type !== 'touch') return;
+      telescopePinch = { gap: Math.hypot(point.x - first.x, point.y - first.y), magnification: telescopeMagnification };
+    }
+    dragged = true;
+  }
   view.setPointerCapture(event.pointerId);
-  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  pointers.set(event.pointerId, point);
 });
 view.addEventListener('pointermove', event => {
   const before = pointers.get(event.pointerId);
   if (!before || flight || ride) return;
-  const next = { x: event.clientX, y: event.clientY };
+  const next = { x: event.clientX, y: event.clientY, type: before.type };
   const dx = next.x - before.x, dy = next.y - before.y;
   if (!dragged && Math.hypot(dx, dy) < 5) return;
   dragged = true;
-  if (pointers.size === 1) rotate(dx, dy);
-  else if (mode === 'globe') {
+  if (pointers.size === 1) {
+    // After a pinch, do not turn the last contact's release movement into aim.
+    if (!telescopePinch) rotate(dx, dy);
+  } else if (telescopePinch || mode === 'globe') {
     const other = [...pointers.entries()].find(([id]) => id !== event.pointerId)[1];
-    zoom(Math.max(1, Math.hypot(before.x - other.x, before.y - other.y)) /
-      Math.max(1, Math.hypot(next.x - other.x, next.y - other.y)));
+    const nextGap = Math.hypot(next.x - other.x, next.y - other.y);
+    if (telescopePinch) {
+      setMagnification(telescopePinch.magnification + (nextGap - telescopePinch.gap) * PINCH_MAGNIFICATION_PER_PIXEL);
+    } else {
+      const beforeGap = Math.hypot(before.x - other.x, before.y - other.y);
+      zoom(Math.max(1, beforeGap) / Math.max(1, nextGap));
+    }
   }
   pointers.set(event.pointerId, next);
 });
 view.addEventListener('pointerup', event => {
   const tracked = pointers.delete(event.pointerId);
-  if (tracked && !dragged && pinning && globe && !flight) {
+  if (tracked && !dragged && pinning && globe && !flight && !ride) {
     const bounds = view.getBoundingClientRect();
     placePin((event.clientX - bounds.left) / bounds.width, (event.clientY - bounds.top) / bounds.height);
   }

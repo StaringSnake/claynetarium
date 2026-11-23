@@ -18,6 +18,12 @@ Open <http://127.0.0.1:8000/>. Do not open the source HTML directly. `dist/` is 
 
 Use the date dial or a date field for large jumps, and the time-of-day dial or time field for finer changes. Edits pause playback. Drag the sky or use arrow keys to look around; in globe mode, drag to orbit and pinch, scroll, or use the zoom buttons. In pin mode, click/tap Earth or use the viewport's arrow keys and Enter to pin the center. The orbit overview compresses the separation and enlarges the Moon; the default globe mode does neither. The surface marker and its label are annotations, not physical objects.
 
+On Earth or the Moon, choose **Telescope** beneath the sky to look through the eyepiece. Scroll up over the scene or spread two fingers to zoom in; scroll down or pinch inward to zoom out. Magnification changes continuously from 1× to 32×. The center stays aimed at the same spot; the lens stretches the view near the rim. You can also focus the **Magnification** slider and use the arrow keys (or Home and End to reach the limits). Drag with one finger, use the mouse, or focus the scene and use arrow keys to aim. After a pinch, lift both fingers before starting a new drag.
+
+Trackpad pinch events sent as Ctrl+scroll zoom the telescope only over the active scene, not over its controls. Elsewhere Ctrl+scroll stays with the browser, and Command/Meta+scroll is never used for telescope zoom. Outside the telescope, scrolling over the surface sky scrolls the page; orbit zoom is separate.
+
+**Exit telescope** (or Escape while the scene or telescope controls have focus) restores the normal 1× view without moving your aim. If the telescope becomes unavailable while one of its controls has focus, focus moves to the scene or a ride control. Reopening at the same observer recalls your zoom, even after an orbit round trip. Changing observer location or traveling to another world closes the eyepiece and resets its zoom to 1×. The telescope does not change time, playback, or what the horizon hides.
+
 ## Code map
 
 - [`src/app.js`](src/app.js): browser entry point, controls, rendering, and travel.

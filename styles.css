@@ -29,11 +29,25 @@ h2 { font-size: 20px; font-weight: 600; }
 .viewport { position: relative; height: clamp(300px, 54vh, 640px); overflow: hidden; background: #090e17; touch-action: none; cursor: grab; isolation: isolate; }
 .viewport:active { cursor: grabbing; }
 .viewport.pinning { cursor: crosshair; }
+.viewport.eyepiece::after {
+  content: '';
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle closest-side, transparent 84%, #07091024 calc(100% - 10px),
+    var(--line) calc(100% - 9px) calc(100% - 8px), #070910 calc(100% - 7px));
+}
 canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 #cheese { background: #78421e; }
 #loading, .view-badge, .zoom { position: absolute; inset: auto auto 16px 16px; }
 .view-badge { color: #e8f9f8; background: #0d171f; padding: 4px 8px; border-radius: var(--radius); pointer-events: none; font-size: 14px; }
 .zoom { display: flex; gap: 4px; left: auto; right: 16px; }
+.telescope { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; flex-basis: 100%; }
+.telescope-controls { display: grid; grid-template-columns: 1fr auto; flex: 1 1 156px; max-width: 320px; column-gap: 8px; }
+.telescope-controls label { margin: 0; }
+.telescope-controls input { grid-column: 1 / -1; }
+#magnification { font-variant-numeric: tabular-nums; }
 .view-foot { justify-content: space-between; min-height: 48px; }
 #lunar-destinations { flex-basis: 100%; }
 #lunar-destinations .actions { margin-top: 4px; }
@@ -66,9 +80,9 @@ input[type=search] { width: 100%; }
 button, summary { cursor: pointer; }
 button { min-width: 44px; font-weight: 600; }
 .primary { border-color: var(--accent); color: #10241f; background: var(--accent); }
-button:enabled:hover, button[aria-pressed=true] { border-color: var(--accent); background: #233c3c; color: #eefcfa; }
-button:enabled:active { filter: brightness(.84); }
-:disabled { opacity: .55; cursor: not-allowed; }
+button:enabled:not([aria-disabled=true]):hover, button[aria-pressed=true] { border-color: var(--accent); background: #233c3c; color: #eefcfa; }
+button:enabled:not([aria-disabled=true]):active { filter: brightness(.84); }
+:disabled, button[aria-disabled=true] { opacity: .55; cursor: not-allowed; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .viewport:focus-visible { outline-offset: -3px; }
 input { accent-color: var(--accent); }
