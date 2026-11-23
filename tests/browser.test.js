@@ -74,7 +74,7 @@ const drag = async (page, x, y, dx, dy) => {
   await page.mouse.move(x, y); await page.mouse.down();
   await page.mouse.move(x + dx, y + dy, { steps: 6 }); await page.mouse.up();
 };
-async function touchGesture(session, steps) {
+async function touchGesture(session, steps, end = 'touchEnd') {
   // Model a stationary release, not a fling that Linux Chromium can use to
   // suppress the following tap. Timestamp the events without sleeping.
   const releasedAt = Date.now() / 1000;
@@ -83,7 +83,14 @@ async function touchGesture(session, steps) {
     touchPoints: steps[i].map(([x, y], id) => ({ x, y, id })),
     timestamp: releasedAt - .2 - (steps.length - 1 - i) * .05,
   });
-  await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [], timestamp: releasedAt });
+  await session.send('Input.dispatchTouchEvent', { type: end, touchPoints: [], timestamp: releasedAt });
+}
+async function wheelScene(page, delta) {
+  const scene = region(page);
+  await scene.scrollIntoViewIfNeeded();
+  const { x, y, width, height } = await scene.boundingBox();
+  await page.mouse.move(x + width / 2, y + height / 2);
+  await page.mouse.wheel(0, delta);
 }
 async function chooseCity(page, name) {
   await page.getByRole('searchbox', { name: 'Search built-in cities' }).fill(name);
@@ -488,21 +495,30 @@ test('emulated phone: touch drag/pinch/orbit/return, no overflow, no stale locat
   await locate(3);
   await page.evaluate(() => window.locationRequests[2].success({ coords: { latitude: 12, longitude: -130 } }));
   assert.equal(await page.locator('#site').textContent(), 'Your location');
-  await magnify(page).tap();
-  assert.equal(await magnification(page).textContent(), '2×');
+  await button(page, 'Telescope').tap();
+  await telescopeRange(page).fill('23.35');
   await button(page, 'Lift off ↗').tap();
   await heading(page, 'Globe view');
   assert.equal(await telescope(page).isVisible(), false);
+  assert.equal(await region(page).evaluate(el => el.classList.contains('eyepiece')), false);
   const orbit = await region(page).boundingBox(), ox = orbit.x + 120, oy = orbit.y + 100;
   await touchGesture(session, [[[ox, oy]], [[ox + 40, oy + 15]]]);
+  const beforePinch = await region(page).screenshot();
   await touchGesture(session, [[[ox, oy], [ox + 40, oy]], [[ox - 20, oy], [ox + 60, oy]]]);
+  assert.notDeepEqual(await region(page).screenshot(), beforePinch);
+  const beforeWheel = await region(page).screenshot();
+  await wheelScene(page, 180);
+  assert.notDeepEqual(await region(page).screenshot(), beforeWheel);
   await button(page, 'Zoom in').tap();
   await button(page, 'Return to surface ↓').tap();
   await heading(page, 'Surface sky');
   assert.equal(await page.locator('#site').textContent(), 'Your location');
-  assert.equal(await magnification(page).textContent(), '2×');
+  assert.equal(await telescopeRange(page).isVisible(), false);
+  await button(page, 'Telescope').tap();
+  assert.equal(await telescopeRange(page).inputValue(), '23.35');
   await chooseCity(page, 'Tokyo');
-  assert.equal(await magnification(page).textContent(), '1×');
+  await button(page, 'Telescope').tap();
+  assert.equal(await telescopeRange(page).inputValue(), '1');
   assert.deepEqual(errors, []);
 });
 
@@ -534,6 +550,7 @@ test('WebGL unavailable leaves working sky, clock and manual location', async t 
   assert.equal(await button(page, 'Place globe pin').isDisabled(), true);
   await chooseCity(page, 'London');
   await page.locator('#zone').getByText(/Europe\/London/).waitFor();
+  assert.ok(await button(page, 'Telescope').isEnabled());
   assert.equal(await button(page, 'Lift off ↗').isDisabled(), true);
   assert.equal(await button(page, 'Travel').isDisabled(), true);
   assert.equal(await button(page, 'Apollo 11 · Near side').isVisible(), false);
@@ -551,6 +568,20 @@ test('WebGL unavailable leaves working sky, clock and manual location', async t 
   await inCheese(page);
   await button(page, 'Try demo sky').click();
   await page.locator('#site').getByText(/Reykjavík · demo sky/).waitFor();
+  assert.deepEqual(errors, []);
+});
+
+test('without a sky renderer the observer readouts work but the telescope is unavailable', async t => {
+  const { page, errors } = await opened(t, {}, () => {
+    const original = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, ...args) {
+      return this.id === 'sky' && type === '2d' ? null : original.call(this, type, ...args);
+    };
+  });
+  await button(page, 'Try demo sky').click();
+  assert.match(await page.locator('#compatibility').textContent(), /cannot draw the sky/);
+  assert.equal(await clock(page), fixed);
+  assert.equal(await telescope(page).isVisible(), false);
   assert.deepEqual(errors, []);
 });
 
@@ -667,10 +698,8 @@ const rocket = page => page.locator('#rocket-ride');
 const flag = page => page.getByRole('img', { name: 'Cheese flag planted on the ground' });
 const skipRide = page => button(page, 'Skip ride');
 const telescope = page => page.getByRole('group', { name: 'Surface telescope' });
-const magnification = page => page.getByRole('status', { name: 'Telescope magnification' });
-const magnify = page => button(page, 'Increase telescope magnification');
-const reduceMagnification = page => button(page, 'Decrease telescope magnification');
-const resetTelescope = page => button(page, 'Reset telescope to 1×');
+const telescopeRange = page => page.getByRole('slider', { name: 'Magnification' });
+const exitTelescope = page => button(page, 'Exit telescope');
 const earthPaint = page => page.locator('#sky').evaluate(async canvas => {
   // View labels change synchronously, but the new observer is painted on RAF.
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -685,6 +714,32 @@ const earthPaint = page => page.locator('#sky').evaluate(async canvas => {
   return { lit, dark, shift };
 });
 
+async function captureTelescope(page, device) {
+  if (process.env.TELESCOPE_SCREENSHOTS) {
+    const zoom = await telescopeRange(page).inputValue();
+    await page.locator('.observatory').screenshot({ path: `${process.env.TELESCOPE_SCREENSHOTS}/telescope-${device}-${zoom}x.png` });
+  }
+}
+
+async function assertAperture(page, normal) {
+  const eyepiece = await region(page).screenshot();
+  const colors = png => page.evaluate(async png => {
+    const image = new Image(); image.src = `data:image/png;base64,${png}`; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+    const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+    const x = image.width / 2, y = image.height / 2, radius = Math.min(x, y);
+    const sample = (x, y) => [...ctx.getImageData(x, y, 1, 1).data.slice(0, 3)];
+    return [
+      sample(x, y), sample(x, y - radius * .8), sample(x + radius * .8, y),
+      sample(x + radius * .8, y - radius * .8), sample(x - radius * .8, y + radius * .8),
+    ];
+  }, png.toString('base64'));
+  const [inside, outside] = await Promise.all([colors(eyepiece), colors(normal)]);
+  assert.deepEqual(inside.slice(0, 3), outside.slice(0, 3), 'center and cardinal samples keep unfiltered sky');
+  for (const corner of inside.slice(3)) assert.deepEqual(corner, [7, 9, 16], 'diagonal samples are outside the aperture');
+  assert.notDeepEqual(outside.slice(3), inside.slice(3), 'closed eyepiece has no mask');
+}
+
 async function manualSite(page, lat, lon) {
   await button(page, 'Pick a place').click();
   await page.getByText('Enter coordinates', { exact: true }).click();
@@ -692,6 +747,125 @@ async function manualSite(page, lat, lon) {
   await page.getByLabel('Longitude').fill(lon);
   await button(page, 'Set coordinates').click();
 }
+
+test('the eyepiece keeps the optical axis fixed and displaces the Sun and horizon near the rim without WebGL', async t => {
+  const { page, errors } = await opened(t, { viewport: { width: 1220, height: 900 } }, () => {
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, ...args) {
+      return type === 'webgl2' ? null : getContext.call(this, type, ...args);
+    };
+  });
+  await page.clock.setFixedTime(new Date('2025-01-06T00:00:00.000Z'));
+  await manualSite(page, '35.681', '139.767');
+  await button(page, 'Pause').click();
+  const optics = () => page.locator('#sky').evaluate(async canvas => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const { width, height } = canvas;
+    const cx = width / 2, cy = height / 2, radius = Math.min(cx, cy);
+    const pixels = canvas.getContext('2d').getImageData(0, 0, width, height).data;
+    const matches = (i, r, g, b) => pixels[i] === r && pixels[i + 1] === g && pixels[i + 2] === b;
+    let sunX = 0, sunY = 0, sunCount = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      if (!matches(i, 255, 240, 189)) continue;
+      const x = (i / 4) % width, y = Math.floor(i / (4 * width));
+      if (Math.hypot(x - cx, y - cy) >= radius - 10) continue;
+      sunX += x; sunY += y; sunCount++;
+    }
+    const groundAt = offset => {
+      const x = Math.round(cx + radius * offset);
+      const ground = [];
+      // Stop inside the visible aperture, not at the edge of the backing canvas.
+      const limit = cy + Math.sqrt((radius - 10) ** 2 - (x - cx) ** 2);
+      for (let y = Math.floor(cy); y < limit; y++) {
+        if (matches(4 * (y * width + x), 17, 29, 34)) ground.push(y);
+      }
+      return { start: ground[0], end: ground.at(-1), count: ground.length };
+    };
+    return { radius, sunCount, sun: [sunX / sunCount - cx, sunY / sunCount - cy],
+      horizon: [groundAt(0), groundAt(.63), groundAt(-.63)] };
+  });
+  const normal = await optics();
+  assert.ok(normal.sunCount > 0 && Math.hypot(...normal.sun) < 2, JSON.stringify(normal));
+  await button(page, 'Telescope').click();
+  const lensed = await optics();
+  assert.deepEqual(lensed.sun, normal.sun);
+  const [center, left, right] = lensed.horizon;
+  const [flat] = normal.horizon;
+  assert.ok(normal.horizon.every(line => line.start === flat.start));
+  assert.ok(Math.abs(center.start - flat.start) < .025 * lensed.radius);
+  assert.ok(left.start - center.start > .025 * lensed.radius, JSON.stringify(lensed.horizon));
+  assert.ok(Math.abs(left.start - right.start) <= 1);
+  for (const line of lensed.horizon) {
+    assert.equal(line.count, line.end - line.start + 1, 'no sky-colored holes in the ground');
+  }
+  await captureTelescope(page, 'desktop-horizon');
+  await exitTelescope(page).click();
+
+  const scene = region(page);
+  await scene.scrollIntoViewIfNeeded();
+  const { x, y, width, height } = await scene.boundingBox();
+  await drag(page, x + width / 2, y + height / 2, 125, 0);
+  const normalEdge = await optics();
+  const bearing = await page.locator('#bearing').innerText();
+  await button(page, 'Telescope').click();
+  const lensedEdge = await optics();
+  const shift = lensedEdge.sun[0] - normalEdge.sun[0];
+  t.diagnostic(`Optical axis unchanged; rimward Sun shift ${shift.toFixed(1)} px; horizon sag ${(left.start - center.start)} px`);
+  assert.ok(normalEdge.sun[0] > .7 * normalEdge.radius);
+  assert.ok(shift > .035 * normalEdge.radius, JSON.stringify({ normalEdge, lensedEdge }));
+  assert.equal(await page.locator('#bearing').innerText(), bearing);
+  await exitTelescope(page).click();
+  assert.deepEqual((await optics()).sun, normalEdge.sun);
+  assert.deepEqual(errors, []);
+});
+
+test('the Moon label stays beside the disk at high zoom, including near the eyepiece rim', async t => {
+  const { page, errors } = await opened(t, { viewport: { width: 1220, height: 900 }, deviceScaleFactor: 1 });
+  await page.clock.setFixedTime(new Date('2025-01-06T12:00:00.000Z'));
+  await manualSite(page, '35.681', '139.767');
+  await button(page, 'Pause').click();
+  const moonAndLabel = rimInset => page.locator('#sky').evaluate(async (canvas, rimInset) => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const { width, height } = canvas;
+    const cx = width / 2, cy = height / 2, radius = Math.min(cx, cy);
+    const pixels = canvas.getContext('2d').getImageData(0, 0, width, height).data;
+    let limb = -1, label = Infinity, labelPixels = 0;
+    for (let y = Math.floor(cy) - 30; y <= cy + 30; y++) {
+      for (let x = Math.floor(cx); x < cx + radius; x++) {
+        if (Math.hypot(x - cx, y - cy) > radius - rimInset) continue;
+        const i = 4 * (y * width + x);
+        const matches = (r, g, b) => pixels[i] === r && pixels[i + 1] === g && pixels[i + 2] === b;
+        if (matches(244, 234, 215) || matches(52, 64, 78)) limb = Math.max(limb, x);
+        if (matches(241, 246, 255)) {
+          label = Math.min(label, x);
+          labelPixels++;
+        }
+      }
+    }
+    return { limb, label, labelPixels, rim: cx + radius - rimInset };
+  }, rimInset);
+  const assertGap = (paint, view) => {
+    const gap = paint.label - paint.limb;
+    assert.ok(paint.limb >= 0 && paint.labelPixels > 5 && gap >= 5 && gap <= 10,
+      `${view}: expected a legible Moon label just right of the limb; got ${JSON.stringify(paint)}, gap ${gap}px`);
+  };
+
+  assertGap(await moonAndLabel(0), 'normal 1×');
+  await button(page, 'Telescope').click();
+  await telescopeRange(page).fill('32');
+  const scene = region(page);
+  await scene.scrollIntoViewIfNeeded();
+  const { x, y, width, height } = await scene.boundingBox();
+  const cx = x + width / 2, cy = y + height / 2;
+  // Exclude the CSS mask and rim from the backing-canvas sample.
+  await drag(page, cx, cy, 90, 0);
+  assertGap(await moonAndLabel(10), 'off-axis 32×');
+  await drag(page, cx, cy, 18, 0);
+  const nearRim = await moonAndLabel(10);
+  assertGap(nearRim, 'near-rim 32×');
+  assert.ok(nearRim.rim - nearRim.label < 24, JSON.stringify(nearRim));
+  assert.deepEqual(errors, []);
+});
 
 test('desktop telescope enlarges the centered lunar Earth without changing its phase or observer', async t => {
   const { page, errors } = await opened(t, { viewport: { width: 1220, height: 900 }, reducedMotion: 'reduce' });
@@ -703,22 +877,53 @@ test('desktop telescope enlarges the centered lunar Earth without changing its p
   const sunPixels = () => page.locator('#sky').evaluate(async canvas => {
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const { width, height } = canvas;
-    const pixels = canvas.getContext('2d').getImageData(width / 2 - 16, height / 2 - 16, 32, 32).data;
-    let count = 0;
-    for (let i = 0; i < pixels.length; i += 4) {
-      if (pixels[i] === 255 && pixels[i + 1] === 240 && pixels[i + 2] === 189) count++;
+    const size = 12; // Isolate the centered disk, away from its text label.
+    const pixels = canvas.getContext('2d').getImageData(width / 2 - size / 2, height / 2 - size / 2, size, size).data;
+    let area = 0;
+    for (let row = 0; row < pixels.length; row += size * 4) {
+      const skyRed = pixels[row]; // The canvas sky gradient is constant across each row.
+      for (let pixel = row + 4; pixel < row + size * 4; pixel += 4) {
+        // Include fractional coverage from the tiny disk's antialiased edge.
+        area += Math.max(0, pixels[pixel] - skyRed) / (255 - skyRed);
+      }
     }
-    return count;
+    return area;
   });
   const normalSun = await sunPixels();
   assert.ok(normalSun > 0);
-  await magnify(page).press('Enter');
-  assert.equal(await magnification(page).textContent(), '2×');
-  assert.ok(await sunPixels() > 3 * normalSun);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await wheelScene(page, 120);
+  await page.waitForFunction(() => window.scrollY > 0);
+  const normalView = await region(page).screenshot();
+  await region(page).focus();
+  await page.keyboard.press('Tab');
+  assert.ok(await button(page, 'Telescope').evaluate(el => el.matches(':focus-visible')));
+  await page.keyboard.press('Enter');
+  assert.equal(await exitTelescope(page).getAttribute('aria-expanded'), 'true');
+  await assertAperture(page, normalView);
+  const beforeWheel = await page.evaluate(() => window.scrollY);
+  await wheelScene(page, -250);
+  await page.waitForFunction(() => document.getElementById('telescope-range').value === '2.25');
+  const sunRatio = await sunPixels() / normalSun;
+  assert.ok(sunRatio > 4 && sunRatio < 6.5, `fractional focal length scaled Sun area by ${sunRatio}`);
+  assert.equal(await page.evaluate(() => window.scrollY), beforeWheel);
+  await captureTelescope(page, 'desktop');
+  await wheelScene(page, 100);
+  await page.waitForFunction(() => document.getElementById('telescope-range').value === '1.75');
+  await exitTelescope(page).hover();
+  const beforeControlWheel = await page.evaluate(() => window.scrollY);
+  await page.mouse.wheel(0, 160);
+  await page.waitForFunction(before => window.scrollY > before, beforeControlWheel);
+  assert.equal(await telescopeRange(page).inputValue(), '1.75');
+  assert.equal(await region(page).evaluate(scene => scene.dispatchEvent(new WheelEvent('wheel', {
+    deltaY: -2, deltaMode: WheelEvent.DOM_DELTA_LINE, bubbles: true, cancelable: true,
+  }))), false);
+  assert.equal(await telescopeRange(page).inputValue(), '1.91');
+
   await button(page, 'Travel').click();
   await button(page, 'Apollo 11 · Near side').click();
   await heading(page, 'Lunar sky');
-  assert.equal(await magnification(page).textContent(), '1×');
+  assert.equal(await telescopeRange(page).isVisible(), false);
   await page.getByText('Object directions', { exact: true }).click();
   const snapshot = () => Promise.all([
     clock(page), ...['site', 'coordinates', 'bearing', 'earth-visibility', 'directions']
@@ -730,40 +935,108 @@ test('desktop telescope enlarges the centered lunar Earth without changing its p
   assert.ok(normal.lit > 0 && normal.dark > 0, JSON.stringify(normal));
 
   await region(page).focus();
-  await page.keyboard.press('Tab'); // Decrease
-  await page.keyboard.press('Tab'); // Increase
-  assert.ok(await magnify(page).evaluate(el => el.matches(':focus-visible')));
-  for (const [step, key] of [[2, 'Enter'], [4, 'Space'], [8, 'Enter']]) {
-    await page.keyboard.press(key);
-    assert.equal(await magnification(page).textContent(), `${step}×`);
-  }
-  assert.equal(await magnify(page).getAttribute('aria-disabled'), 'true');
-  await page.keyboard.press('Enter');
-  assert.equal(await magnification(page).textContent(), '8×');
-  const zoomed = await earthPaint(page);
-  assert.ok(zoomed.lit + zoomed.dark > 55 * (normal.lit + normal.dark), JSON.stringify({ normal, zoomed }));
-  const litFraction = ({ lit, dark }) => lit / (lit + dark);
-  assert.ok(Math.abs(litFraction(zoomed) - litFraction(normal)) < .04, JSON.stringify({ normal, zoomed }));
-  assert.deepEqual(await snapshot(), before);
-
-  await page.keyboard.press('Shift+Tab');
-  await page.keyboard.press('Enter');
-  assert.equal(await magnification(page).textContent(), '4×');
-  await page.keyboard.press('Tab');
   await page.keyboard.press('Tab');
   await page.keyboard.press('Space');
-  assert.equal(await magnification(page).textContent(), '1×');
-  assert.equal(await resetTelescope(page).getAttribute('aria-disabled'), 'true');
-  assert.ok(await resetTelescope(page).evaluate(el => el.matches(':focus-visible')));
+  await page.keyboard.press('Tab');
+  assert.ok(await telescopeRange(page).evaluate(el => el.matches(':focus-visible')));
+  assert.equal(await telescopeRange(page).inputValue(), '1');
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await telescopeRange(page).getAttribute('aria-valuetext'), '1.01×');
+  await telescopeRange(page).fill('8');
+  const eight = await earthPaint(page);
+  const litFraction = ({ lit, dark }) => lit / (lit + dark);
+  assert.ok(eight.lit + eight.dark > 55 * (normal.lit + normal.dark), JSON.stringify({ normal, eight }));
+  assert.ok(Math.abs(litFraction(eight) - litFraction(normal)) < .04, JSON.stringify({ normal, eight }));
+  await page.keyboard.press('End');
+  assert.equal(await telescopeRange(page).getAttribute('aria-valuetext'), '32×');
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await telescopeRange(page).inputValue(), '32');
+  assert.equal(await region(page).evaluate(scene => scene.dispatchEvent(new WheelEvent('wheel', {
+    deltaY: -1000, bubbles: true, cancelable: true,
+  }))), false);
+  assert.equal(await telescopeRange(page).inputValue(), '32');
+  const zoomed = await earthPaint(page);
+  assert.ok(zoomed.lit + zoomed.dark > 900 * (normal.lit + normal.dark), JSON.stringify({ normal, zoomed }));
+  // At 32× Earth can fill the field; the clipped light/dark ratio is not its phase.
+  assert.ok(zoomed.lit > eight.lit && zoomed.dark > eight.dark);
+  assert.deepEqual(await snapshot(), before);
+  await captureTelescope(page, 'desktop');
+
+  await page.keyboard.press('Escape');
+  assert.equal(await telescopeRange(page).isVisible(), false);
+  assert.ok(await button(page, 'Telescope').evaluate(el => el.matches(':focus-visible') && el === document.activeElement));
   assert.deepEqual(await snapshot(), before);
   const reset = await earthPaint(page);
   // Exact-color counts exclude antialiased edge pixels, which can differ on repaint.
   assert.ok(Math.abs((reset.lit + reset.dark) / (normal.lit + normal.dark) - 1) < .06, JSON.stringify({ normal, reset }));
   assert.ok(Math.abs(reset.shift / reset.lit - normal.shift / normal.lit) < .5, JSON.stringify({ normal, reset }));
-  await magnify(page).press('Enter');
+  await button(page, 'Telescope').press('Enter');
+  assert.equal(await telescopeRange(page).inputValue(), '32');
+  await region(page).press('Escape');
+  assert.equal(await telescopeRange(page).isVisible(), false);
+  await button(page, 'Telescope').click();
   await button(page, 'Return to Earth').click();
   await heading(page, 'Surface sky');
-  assert.equal(await magnification(page).textContent(), '1×');
+  await button(page, 'Telescope').click();
+  assert.equal(await telescopeRange(page).inputValue(), '1');
+  assert.deepEqual(errors, []);
+});
+
+test('trackpad-style Ctrl+wheel zooms only over the active telescope scene', async t => {
+  const { page, errors } = await opened(t, { reducedMotion: 'reduce' });
+  const scene = region(page);
+  const wheelNotCanceled = (target, modifiers) => target.evaluate((el, modifiers) =>
+    el.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true, ...modifiers })), modifiers);
+  await button(page, 'Try demo sky').click();
+  assert.equal(await wheelNotCanceled(scene, { ctrlKey: true }), true, 'closed telescope leaves browser zoom alone');
+  await button(page, 'Telescope').click();
+  const slider = telescopeRange(page);
+  assert.equal(await wheelNotCanceled(slider, { ctrlKey: true }), true, 'telescope controls leave browser zoom alone');
+  assert.equal(await wheelNotCanceled(button(page, 'Pause'), { ctrlKey: true }), true, 'outside the scene is not captured');
+  assert.equal(await wheelNotCanceled(scene, { metaKey: true }), true, 'Command/Meta is not a pinch signal');
+  assert.equal(await wheelNotCanceled(scene, { ctrlKey: true, shiftKey: true }), true, 'modified shortcuts are not pinch signals');
+  assert.equal(await slider.inputValue(), '1');
+  await page.evaluate(() => {
+    document.addEventListener('wheel', event => {
+      window.observedWheel = { ctrlKey: event.ctrlKey, canceled: event.defaultPrevented };
+    }, { once: true });
+  });
+  await page.keyboard.down('Control');
+  try { await wheelScene(page, -120); }
+  finally { await page.keyboard.up('Control'); }
+  const observed = await page.waitForFunction(() => window.observedWheel);
+  assert.deepEqual(await observed.jsonValue(), { ctrlKey: true, canceled: true });
+  assert.equal(await slider.inputValue(), '1.6');
+
+  await button(page, 'Lift off ↗').click();
+  await heading(page, 'Globe view');
+  assert.equal(await wheelNotCanceled(scene, { ctrlKey: true }), true, 'orbit leaves browser zoom alone');
+  assert.equal(await wheelNotCanceled(scene, { metaKey: true }), true, 'orbit leaves Command/Meta alone');
+  assert.deepEqual(errors, []);
+});
+
+test('lift-off moves focus only if it hides a focused telescope control', async t => {
+  const { page, errors } = await opened(t, { reducedMotion: 'reduce' });
+  const scene = region(page);
+  const liftOff = button(page, 'Lift off ↗');
+  await button(page, 'Try demo sky').click();
+  await button(page, 'Telescope').press('Enter');
+  await page.keyboard.press('Tab');
+  assert.ok(await telescopeRange(page).evaluate(el => el === document.activeElement));
+  // Activate the real lift-off action without the pointer moving focus off the slider first.
+  await liftOff.dispatchEvent('click');
+  await heading(page, 'Globe view');
+  assert.equal(await telescopeRange(page).isVisible(), false);
+  assert.ok(await scene.evaluate(el => el === document.activeElement && el.matches(':focus-visible')));
+
+  await button(page, 'Return to surface ↓').click();
+  await heading(page, 'Surface sky');
+  await button(page, 'Telescope').click();
+  const pause = button(page, 'Pause');
+  await pause.focus();
+  await liftOff.dispatchEvent('click');
+  await heading(page, 'Globe view');
+  assert.ok(await pause.evaluate(el => el === document.activeElement));
   assert.deepEqual(errors, []);
 });
 
@@ -775,9 +1048,37 @@ test('phone telescope works by touch during playback and cannot reveal far-side 
   await page.waitForFunction(() => document.getElementById('bearing').textContent !== '');
   assert.ok(await button(page, 'Pause').isVisible());
   const initialBearing = await page.locator('#bearing').innerText();
-  await magnify(page).tap();
-  assert.equal(await magnification(page).textContent(), '2×');
+  const normalView = await region(page).screenshot();
+  await button(page, 'Telescope').tap();
+  await assertAperture(page, normalView);
+  await region(page).scrollIntoViewIfNeeded();
+  const center = async () => {
+    const { x, y, width, height } = await region(page).boundingBox();
+    return [x + width / 2, y + height / 2];
+  };
+  let [cx, cy] = await center();
+  const session = await page.context().newCDPSession(page);
+  await touchGesture(session, [
+    [[cx - 30, cy], [cx + 30, cy]],
+    [[cx - 48, cy], [cx + 48, cy]],
+    [[cx - 65, cy], [cx + 65, cy]],
+  ]);
+  assert.equal(await telescopeRange(page).inputValue(), '2.4');
+  await captureTelescope(page, 'portrait');
+  await telescopeRange(page).fill('31');
+  [cx, cy] = await center();
+  await touchGesture(session, [[[cx - 30, cy], [cx + 30, cy]], [[cx - 65, cy], [cx + 65, cy]]]);
+  assert.equal(await telescopeRange(page).inputValue(), '32');
+  await captureTelescope(page, 'portrait');
+  await telescopeRange(page).fill('2.4');
   assert.equal(await page.locator('#bearing').innerText(), initialBearing);
+  [cx, cy] = await center();
+  await touchGesture(session, [[[cx - 65, cy], [cx + 65, cy]], [[cx - 45, cy], [cx + 45, cy]]], 'touchCancel');
+  assert.equal(await telescopeRange(page).inputValue(), '1.6');
+  assert.equal(await page.locator('#bearing').innerText(), initialBearing);
+  await touchGesture(session, [[[cx, cy]], [[cx + 40, cy + 10]]]);
+  await page.waitForFunction(before => document.getElementById('bearing').textContent !== before, initialBearing);
+  assert.equal(await telescopeRange(page).inputValue(), '1.6');
   assert.ok(await button(page, 'Pause').isVisible());
   await page.clock.setFixedTime(new Date('2024-04-08T12:00:03.000Z'));
   await page.waitForFunction(() => document.getElementById('local-clock').dateTime === '2024-04-08T12:00:03.000Z');
@@ -787,20 +1088,17 @@ test('phone telescope works by touch during playback and cannot reveal far-side 
   await button(page, 'Far-side equator').tap();
   await page.getByText(/Moon blocks the view/).waitFor();
   const normal = await earthPaint(page);
-  for (const step of [2, 4, 8]) {
-    await magnify(page).tap();
-    assert.equal(await magnification(page).textContent(), `${step}×`);
-  }
+  await button(page, 'Telescope').tap();
+  assert.equal(await telescopeRange(page).inputValue(), '1');
+  await telescopeRange(page).fill('32');
   assert.deepEqual(await earthPaint(page), normal);
   assert.deepEqual(normal, { lit: 0, dark: 0, shift: 0 });
-  await reduceMagnification(page).tap();
-  assert.equal(await magnification(page).textContent(), '4×');
-  await resetTelescope(page).tap();
-  assert.equal(await magnification(page).textContent(), '1×');
-  for (const control of [magnify(page), reduceMagnification(page), resetTelescope(page)]) {
+  for (const control of [telescopeRange(page), exitTelescope(page)]) {
     const box = await control.boundingBox();
     assert.ok(box.width >= 44 && box.height >= 44);
   }
+  await exitTelescope(page).tap();
+  assert.equal(await telescopeRange(page).isVisible(), false);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   assert.deepEqual(errors, []);
 });
@@ -836,6 +1134,7 @@ test('normal-motion 3D round trip from manual coordinates completes and keeps th
   ]) {
     await button(page, departure).click();
     await rocket(page).waitFor({ state: 'visible' });
+    assert.equal(await telescope(page).isVisible(), false);
     const [width, height] = await page.locator('#space').evaluate(canvas => [canvas.width, canvas.height]);
     assert.ok(width >= 1280 && height >= 720, `${width}×${height}`);
     t.diagnostic(`1280×720 CSS viewport ride buffer: ${width}×${height}`);

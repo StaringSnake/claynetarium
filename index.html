@@ -31,12 +31,6 @@
         <p id="loading">Opening the cheese wheel…</p>
         <div class="view-badge" id="view-badge" hidden></div>
         <div class="zoom" id="zoom" hidden><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button></div>
-        <div class="zoom telescope" id="telescope" role="group" aria-label="Surface telescope" hidden>
-          <output id="magnification" aria-label="Telescope magnification">1×</output>
-          <button id="telescope-out" type="button" aria-label="Decrease telescope magnification" aria-disabled="true">−</button>
-          <button id="telescope-in" type="button" aria-label="Increase telescope magnification">+</button>
-          <button id="telescope-reset" type="button" aria-label="Reset telescope to 1×" aria-disabled="true">Reset</button>
-        </div>
         <div id="arrival-flag" class="arrival-flag" role="img" aria-label="Cheese flag planted on the ground" hidden>
           <svg viewBox="0 0 96 80" aria-hidden="true">
             <path d="M6 72L14 65L28 64L39 60L56 63L65 68L82 74L70 77L19 77Z" fill="#747079"/>
@@ -52,6 +46,13 @@
       <div class="view-foot">
         <p id="rocket-ride" class="muted" hidden><strong id="ride-phase"></strong> · <span id="ride-route"></span></p>
         <p class="muted" id="view-help">Drag, swipe, or use arrow keys to look around inside the wheel.</p>
+        <div class="telescope" id="telescope" role="group" aria-label="Surface telescope" hidden>
+          <button class="primary" id="telescope-toggle" type="button" aria-expanded="false" aria-controls="telescope-controls">Telescope</button>
+          <div class="telescope-controls" id="telescope-controls" hidden>
+            <label for="telescope-range">Magnification</label><span id="magnification" aria-hidden="true">1×</span>
+            <input id="telescope-range" type="range" min="1" max="32" step="0.01" value="1" aria-valuetext="1×">
+          </div>
+        </div>
         <p class="notice" id="pin-status" role="status" hidden></p>
         <p class="notice" id="travel-status" role="status" hidden></p>
         <div class="actions" id="orbit-tools" hidden>
