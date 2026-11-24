@@ -49,8 +49,7 @@ async function openPanel(page, name) {
 }
 const clock = page => page.locator('#local-clock').getAttribute('datetime');
 const heading = (page, name) => page.getByRole('heading', { name, exact: true }).waitFor({ timeout: 5000 });
-async function captureLayout(page, name) {
-  const folder = process.env.LAYOUT_SCREENSHOTS;
+async function captureLayout(page, name, folder = process.env.LAYOUT_SCREENSHOTS) {
   if (!folder) return;
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.screenshot({ path: `${folder}/${name}.png`, scale: 'css' });
@@ -1072,6 +1071,161 @@ async function manualSite(page, lat, lon) {
   await button(page, 'Set coordinates').click();
 }
 
+async function aimNearHorizon(page, azimuth, previousBearing = '') {
+  const bearing = page.locator('#bearing');
+  // The heading updates on arrival, but the bearing still describes the
+  // departure camera until the first frame at the new site has been drawn.
+  const painted = await page.waitForFunction(previous => {
+    const text = document.getElementById('bearing').textContent;
+    return text && text !== previous ? text : false;
+  }, previousBearing);
+  const [, az, alt] = (await painted.jsonValue()).match(/(\d+)° · (-?\d+)° altitude/);
+  const yawToTarget = current => (azimuth - Number(current) + 540) % 360 - 180;
+  const yaw = yawToTarget(az);
+  const pitch = -Number(alt);
+  for (const [change, positive, negative] of [[yaw, 'ArrowRight', 'ArrowLeft'], [pitch, 'ArrowUp', 'ArrowDown']]) {
+    for (let i = 0; i < Math.round(Math.abs(change) / 6.16); i++) {
+      await region(page).press(change > 0 ? positive : negative);
+    }
+  }
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const actual = await bearing.innerText();
+  const [, actualAz, actualAlt] = actual.match(/(\d+)° · (-?\d+)° altitude/);
+  assert.ok(Math.abs(yawToTarget(actualAz)) <= 4 && Math.abs(Number(actualAlt)) <= 4,
+    `expected aim near ${azimuth}° along the horizon; painted bearing was ${actual}`);
+  return actual;
+}
+
+async function surfaceColors(page, { airless = false } = {}) {
+  return page.locator('#sky').evaluate(async (canvas, airless) => {
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const ctx = canvas.getContext('2d');
+    const color = (x, y) => Array.from(ctx.getImageData(
+      Math.round(canvas.width * x), Math.round(canvas.height * y), 1, 1).data.slice(0, 3));
+    const colors = { sky: color(.5, .3), left: color(.28, .7), right: color(.72, .7) };
+    if (airless) {
+      const isSky = ([r, g, b]) => r === 7 && g === 9 && b === 16;
+      if (!isSky(colors.sky) || isSky(colors.left) || isSky(colors.right)) {
+        throw new Error(`expected lunar sky above two foreground samples, got ${JSON.stringify(colors)}`);
+      }
+    }
+    return colors;
+  }, airless);
+}
+
+const captureSunlight = (page, name) => process.env.SUNLIGHT_SCREENSHOTS &&
+  captureLayout(page, name, process.env.SUNLIGHT_SCREENSHOTS);
+const brightness = rgb => rgb.reduce((sum, channel) => sum + channel, 0);
+
+test('Earth foreground follows low Sun from either side and retains only diffuse twilight below the horizon', async t => {
+  const { page, errors } = await opened(t, { viewport: { width: 1220, height: 900 } }, () => {
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, ...args) {
+      return type === 'webgl2' ? null : getContext.call(this, type, ...args);
+    };
+  });
+  await manualSite(page, '35', '0');
+  await openPanel(page, 'Time');
+  await button(page, 'Pause').click();
+  await button(page, 'Time').click();
+  const bearing = await aimNearHorizon(page, 180);
+  const noon = await surfaceColors(page);
+  await captureSunlight(page, 'desktop-earth-noon');
+
+  async function time(value) {
+    await openPanel(page, 'Time');
+    await page.getByLabel('Enter local time').fill(value);
+    await button(page, 'Time').click();
+    assert.equal(await clock(page), `2024-04-08T${value}.000Z`);
+    assert.equal(await page.locator('#bearing').innerText(), bearing, 'time edits preserve aim');
+    return surfaceColors(page);
+  }
+
+  // At 35° N, 0° on this date, the modeled Sun is low in the east at 06:00
+  // and low in the west at 18:00, with both samples above the horizon.
+  const dawn = await time('06:00:00');
+  assert.ok(brightness(dawn.left) > brightness(dawn.right) + 35, JSON.stringify(dawn));
+  await captureSunlight(page, 'desktop-earth-low-east');
+  const dusk = await time('18:00:00');
+  assert.ok(brightness(dusk.right) > brightness(dusk.left) + 35, JSON.stringify(dusk));
+  assert.ok(dusk.right[0] > dusk.right[2] + 10, `the directly lit ground is warm: ${JSON.stringify(dusk)}`);
+  assert.ok(dusk.left[2] > dusk.left[0], 'the unlit side does not pick up the warm tint');
+  assert.ok(noon.right[2] > noon.right[0] + 10, 'high Sun keeps the existing cool palette');
+  assert.ok(brightness(noon.right) > brightness(dusk.right) + 35);
+  await captureSunlight(page, 'desktop-earth-low-west');
+  await button(page, 'Telescope').click();
+  const eyepiece = await surfaceColors(page);
+  assert.ok(eyepiece.right[0] > eyepiece.left[0] + 20);
+  await captureSunlight(page, 'desktop-earth-low-west-eyepiece');
+  await exitTelescope(page).click();
+
+  const twilight = await time('18:35:00');
+  assert.deepEqual(twilight.left, twilight.right, 'below the horizon there is no directional direct contribution');
+  await captureSunlight(page, 'desktop-earth-twilight');
+  const night = await time('21:00:00');
+  assert.deepEqual(night.left, night.right);
+  assert.ok(brightness(twilight.left) > brightness(night.left));
+  assert.ok(brightness(twilight.sky) > brightness(night.sky));
+  await captureSunlight(page, 'desktop-earth-night');
+
+  await chooseCity(page, 'Honolulu');
+  assert.equal(await clock(page), '2024-04-08T21:00:00.000Z');
+  await heading(page, 'Surface sky');
+  await aimNearHorizon(page, 180, bearing);
+  assert.ok(brightness((await surfaceColors(page)).left) > brightness(night.left) + 100);
+  assert.deepEqual(errors, []);
+});
+
+test('phone lunar foreground changes with the Sun without atmospheric warmth or twilight', async t => {
+  const { page, errors } = await opened(t, {
+    ...devices['iPhone 13'], viewport: { width: 390, height: 664 }, reducedMotion: 'reduce',
+  });
+  await page.clock.setFixedTime(new Date('2025-01-06T00:00:00.000Z'));
+  await button(page, 'Try demo sky').tap();
+  await openPanel(page, 'Time');
+  await button(page, 'Pause').tap();
+  await openPanel(page, 'Travel');
+  const earthBearing = await page.locator('#bearing').innerText();
+  await button(page, 'Apollo 11 · Near side').tap();
+  await heading(page, 'Lunar sky');
+  const bearing = await aimNearHorizon(page, 180, earthBearing);
+  const lunarColors = () => surfaceColors(page, { airless: true });
+  const east = await lunarColors();
+  await captureSunlight(page, 'phone-moon-sunlit-east');
+
+  async function date(value) {
+    await openPanel(page, 'Time');
+    await page.getByLabel('Enter local date').fill(value);
+    await button(page, 'Time').tap();
+    assert.equal(await clock(page), `${value}T00:00:00.000Z`);
+    assert.equal(await page.locator('#bearing').innerText(), bearing);
+    return lunarColors();
+  }
+
+  const west = await date('2025-01-19');
+  await captureSunlight(page, 'phone-moon-sunlit-west');
+  assert.ok(brightness(east.left) > brightness(east.right) + 40, JSON.stringify(east));
+  assert.ok(brightness(west.right) > brightness(west.left) + 40, JSON.stringify(west));
+  await button(page, 'Telescope').tap();
+  const eyepiece = await lunarColors();
+  assert.ok(brightness(eyepiece.right) > brightness(eyepiece.left) + 40, JSON.stringify(eyepiece));
+  await captureSunlight(page, 'phone-moon-sunlit-west-eyepiece');
+  await exitTelescope(page).tap();
+
+  const below = await date('2025-01-20');
+  await captureSunlight(page, 'phone-moon-unlit');
+  await button(page, 'Telescope').tap();
+  await captureSunlight(page, 'phone-moon-unlit-eyepiece');
+  await exitTelescope(page).tap();
+  const night = await date('2025-01-23');
+  assert.deepEqual(below, night, 'Sun just below the horizon renders like deep lunar night');
+  assert.deepEqual(west.sky, night.sky, 'there is no solar scattering in the lunar sky');
+  const lunarRedBlue = ([r, , b]) => r - b;
+  assert.ok(Math.abs(lunarRedBlue(west.right) - lunarRedBlue(night.right)) <= 2,
+    'the direct light raises all channels equally even at low altitude');
+  assert.deepEqual(errors, []);
+});
+
 test('the eyepiece keeps the optical axis fixed and displaces the Sun and horizon near the rim without WebGL', async t => {
   const { page, errors } = await opened(t, { viewport: { width: 1220, height: 900 } }, () => {
     const getContext = HTMLCanvasElement.prototype.getContext;
@@ -1102,8 +1256,13 @@ test('the eyepiece keeps the optical axis fixed and displaces the Sun and horizo
       const ground = [];
       // Stop inside the visible aperture, not at the edge of the backing canvas.
       const limit = cy + Math.sqrt((radius - 10) ** 2 - (x - cx) ** 2);
+      // The lit ground varies across the frame, but is constant down a column
+      // apart from one-channel-step gradient dithering.
+      const reference = 4 * ((Math.floor(limit) - 1) * width + x);
+      const groundColor = pixels.subarray(reference, reference + 3);
       for (let y = Math.floor(cy); y < limit; y++) {
-        if (matches(4 * (y * width + x), 17, 29, 34)) ground.push(y);
+        const index = 4 * (y * width + x);
+        if (groundColor.every((value, channel) => Math.abs(pixels[index + channel] - value) <= 1)) ground.push(y);
       }
       return { start: ground[0], end: ground.at(-1), count: ground.length };
     };
@@ -1117,7 +1276,7 @@ test('the eyepiece keeps the optical axis fixed and displaces the Sun and horizo
   assert.deepEqual(lensed.sun, normal.sun);
   const [center, left, right] = lensed.horizon;
   const [flat] = normal.horizon;
-  assert.ok(normal.horizon.every(line => line.start === flat.start));
+  assert.ok(normal.horizon.every(line => line.start === flat.start), JSON.stringify(normal.horizon));
   assert.ok(Math.abs(center.start - flat.start) < .025 * lensed.radius);
   assert.ok(left.start - center.start > .025 * lensed.radius, JSON.stringify(lensed.horizon));
   assert.ok(Math.abs(left.start - right.start) <= 1);

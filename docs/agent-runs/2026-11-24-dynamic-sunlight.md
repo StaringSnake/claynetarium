@@ -1,0 +1,49 @@
+# Run: Dynamic surface sunlight
+
+Date: 2026-11-24
+Status: revised patch approved by independent acceptance
+
+## Scope and baseline
+
+- Verified [issue #16](https://github.com/StaringSnake/claynetarium/issues/16) against the existing Earth and lunar surface specs. Verified PR #17 was merged and fetched `origin/main` at `0383ed47bd4a971b24e48edd635c6485c714bfe8`. Resumed the existing `feature/dynamic-sunlight` branch on that exact commit in the ordinary checkout; there were no existing #16 code edits. Preserved unrelated harness and playback-planning edits.
+- Changes are confined to the Canvas 2D surface renderer, browser verification, and this journal. No change to ephemerides, disk phases, aiming, input, orbit or rocket ride lighting, assets, or dependencies. No commit, push, or PR at implementation handoff. Merge and deployment are outside this run.
+
+## Implementation
+
+- Surface brightness comes from the existing local Sun vector and representative foreground slopes. The same model controls the existing lunar crater lips and bowls. The ramp is illustrative, not terrain geometry, cast shadows, or photometrically calibrated light.
+- Direct light is off once the modeled solar center is at or below zero altitude. Earth has warmer direct sunlight near the horizon and a separate, diffuse twilight contribution. Its existing daylight-glare control still affects the sky, not the foreground. The Moon has neither twilight nor warm atmospheric tint. Existing disk and event conventions are unchanged.
+- The existing horizon geometry and telescope aperture stay in place. At a high pointing angle the foreground can still be out of frame; look toward the horizon to compare surface light without changing aim between time edits.
+- Lighting adds at most one foreground gradient and up to four lunar crater-rim gradients per paint, independent of resolution and zoom. It reuses the existing four crater shapes and introduces no pixel processing, buffer allocations, or additional render scheduling. This is a draw-operation bound, not a GPU benchmark.
+- An instrumented Chromium Canvas 2D smoke check counted linear gradients on both a 1220×716 scene at DPR 1 and a 390×442 scene at DPR 2. The total changed from 1 to 2 for Earth high Sun, low Sun through the eyepiece, and twilight; from 0 to 5 for a sunlit Moon in normal and telescope modes; and from 0 to 1 for the unlit Moon. A sky-only lunar frame remained at zero.
+
+## Review evidence
+
+- The deterministic Earth case holds the camera and observer at 35° N, 0° on 2024-04-08. The modeled Sun is at +62.5° at 12:00 UTC, +4.1° in the east at 06:00, +4.8° in the west at 18:00, −1.8° at 18:35, and −29.2° at 21:00. It also switches to Honolulu without advancing the clock. The desktop fixture disables WebGL 2 to exercise the fallback.
+- The Apollo 11 case holds the camera through date edits at 00:00 UTC: 2025-01-06 (+12.1°, east), 01-19 (+10.0°, west), 01-20 (−2.1°), and 01-23 (−38.6°). Pixel checks compare the foreground and sky across those states, including neutral direct light and identical below-horizon samples.
+- Eleven local screenshots are in `.git/info/dynamic-sunlight-images/`: Earth at 1220×900 desktop and Moon at 390×664 phone size, including normal and telescope framing. Visually checked the east/west reversal, Earth noon versus twilight/night, and the phone lunar rim highlights versus unlit regolith. Night remains dark while the cardinal marker and controls stay readable; the new light is conveyed by brightness and direction, not just hue. No physical-device or screen-reader manual testing.
+- On Node 24.20.0 and Chrome 158.0.8127.38, `npm test` passed 16 tests and `SUNLIGHT_SCREENSHOTS=.git/info/dynamic-sunlight-images npm run test:browser` built the static site and passed all 33 browser tests, including the existing accessibility, input, phase, orbit and ride checks. `node --test --test-name-pattern='foreground|displaces the Sun' tests/browser.test.js` passed all 3 focused checks, including the lensed horizon sag and rimward Sun shift. JavaScript syntax and diff whitespace checks passed; the project has no separate lint or type-check command.
+- The task-only review diff against the verified base is `.git/info/dynamic-sunlight-issue-16.patch`. It excludes all pre-existing working-tree edits.
+
+## Review handoff
+
+- General review: **APPROVE**, no findings (inherited). Performance review: **APPROVE**, no findings (inherited). Dedicated security review skipped: no new permissions, secrets, network access, or data handling.
+- Independent acceptance fallback: the dedicated verifier model had been unavailable. The initial verifier matched the complete working snapshot byte-for-byte to review patch SHA-256 `e48da2b4fbc9d62c18cc4148f691b0629d7c09343d2afe61663cde61d7672879` at base `0383ed47`. The renderer is still identical; the test-only revision is described below.
+- The verifier queried the existing model separately for the browser fixtures and confirmed the altitude and east/west transitions above. At 21:00 UTC, changing to Honolulu moves the modeled Sun from −29.16° to +63.72° at the same instant. Source inspection confirmed that site changes invalidate and recompute the local sky, time edits redraw without re-aiming, and the change is isolated from orbit and rocket renderers.
+- Independent run on Node 24.20.0 and Chrome 158.0.8127.38: `npm test` passed 16/16; JavaScript syntax and task-diff whitespace checks passed. `SUNLIGHT_SCREENSHOTS=.git/info/dynamic-sunlight-independent-images npm run test:browser` built successfully and passed 32/33, including the Earth foreground, no-WebGL telescope, orbit, and rocket checks.
+- The phone lunar test failed at `tests/browser.test.js:1189`: all three samples were `[7,9,16]`, the lunar sky color. Both screenshots from that run show the camera still pitched at `59°` after `aimNearHorizon`, with no foreground in frame. This run therefore did not verify lunar illumination. The cause of the aiming failure is not established. Eight new captures were saved locally; the eleven captures above are from the earlier implementation run. No pass-seeking retry, code or test fix, commit, push, PR, or hosted CI run was attempted after the failure.
+- Limitations: local Chrome/Chromium only, with an emulated phone, not a physical device or native Safari. The renderer uses illustrative slopes and crater shading; the final textured appearance should be checked with this lighting once [#2](https://github.com/StaringSnake/claynetarium/issues/2) lands.
+
+## Acceptance failure diagnosis and test revision
+
+- Reproduced the exact failure by holding the first lunar animation-frame paint during reduced-motion arrival. The heading was already `Lunar sky`, but the bearing still read `W 263° · 8° altitude` from Earth. The first lunar frame actually starts at `W 268° · 65° altitude`. Applying the old helper's keys computed from the stale bearing reproduced `S 188° · 59° altitude` and both ground samples as `[7, 9, 16]` (sky). Without the hold, whether the helper saw the stale bearing depended on whether the browser painted before the test read it.
+- The test now waits for the newly painted bearing instead of using heading visibility as a paint signal. It asserts its final yaw and pitch before checking lighting and verifies both lunar side samples are foreground. It also waits for a fresh bearing after the Honolulu observer change. Lighting assertions and production code are unchanged.
+- `node .git/info/dynamic-sunlight-reproduce.mjs` (after building) compares the old and revised helpers with the same delayed-paint setup. Revised result: `S 182° · -3° altitude`, left `[58, 57, 61]`, right `[31, 30, 34]`, passing the existing brightness threshold.
+- Revised verification on Node 24.20.0 / Chrome 158.0.8127.38: `npm test` 16/16, `npm run build` passed, `node --test --test-name-pattern='foreground|displaces the Sun' tests/browser.test.js` 3/3, and `npm run test:browser` 33/33. Syntax and diff whitespace checks passed. No retries or skips.
+- Revised screenshots are in `.git/info/dynamic-sunlight-revision-images/`. The cumulative review diff is `.git/info/dynamic-sunlight-issue-16-test-revision.patch`; it includes this journal and excludes the unrelated checkout edits. The original review and acceptance artifacts are retained.
+
+## Independent acceptance of the revision
+
+- Matched the complete checkout snapshot byte-for-byte to cumulative patch SHA-256 `0f1b5622a48c946412881c0bf3d65202f90f754824a06fe48c154499a384e5e7` at `0383ed47` before updating this journal. General review approved the revision; the original performance approval still applies because the renderer is byte-identical. Dedicated security review remains skipped for the same scope.
+- Independently ran the delayed-paint reproduction: the old helper sampled sky at `59°` altitude, and the revised helper aimed at `−3°` and sampled distinct lit and unlit foreground pixels. Nine independent assertions against the existing model confirmed the fixture directions, elevations, and same-instant Honolulu site change.
+- Captured eleven new examples in `.git/info/dynamic-sunlight-independent-revision-images/` at 1220×900 and 390×664. Inspected Earth noon, warm western light, and diffuse twilight, plus the neutral lunar east/west reversal and dark below-horizon foreground.
+- Verdict: **APPROVE**. `npm run build` passed, `npm test` passed 16/16, and `SUNLIGHT_SCREENSHOTS=.git/info/dynamic-sunlight-independent-revision-images npm run test:browser` passed 33/33 on Node 24.20.0 / headless Chrome 158.0.8127.38, with no retries or skips. Verified time and location updates, direct light off below the horizon on both bodies, Earth-only warmth and twilight, and unchanged astronomy, telescope aiming, no-WebGL fallback, orbit, and ride behavior. Syntax and diff whitespace checks passed. The local browser and texture limitations above still apply.
