@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { after, before, test } from 'node:test';
 import { chromium, devices } from 'playwright-core';
+import { solarReference } from './fixtures/solar-horizons.js';
 
 const files = new Map([['', ['index.html', 'text/html']], ['styles.css', ['styles.css', 'text/css']],
   ['app.js', ['app.js', 'text/javascript']]]);
@@ -48,7 +49,7 @@ async function openPanel(page, name) {
   if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
 }
 const clock = page => page.locator('#local-clock').getAttribute('datetime');
-const heading = (page, name) => page.getByRole('heading', { name, exact: true }).waitFor({ timeout: 5000 });
+const heading = (page, name) => page.getByRole('heading', { name, exact: true, level: 2 }).waitFor({ timeout: 5000 });
 async function captureLayout(page, name, folder = process.env.LAYOUT_SCREENSHOTS) {
   if (!folder) return;
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -56,6 +57,12 @@ async function captureLayout(page, name, folder = process.env.LAYOUT_SCREENSHOTS
 }
 function controlledFrames() {
   let now = 0, wall = Date.parse('2024-04-08T12:00:00.000Z'), callbacks = [];
+  window.solarDraws = 0;
+  const draw = WebGL2RenderingContext.prototype.drawElements;
+  WebGL2RenderingContext.prototype.drawElements = function (...args) {
+    if (document.getElementById('viewport')?.classList.contains('solar')) window.solarDraws++;
+    return draw.apply(this, args);
+  };
   Date.now = () => wall;
   window.setWallTime = iso => { wall = Date.parse(iso); };
   performance.now = () => now;
@@ -69,12 +76,33 @@ function controlledFrames() {
     }
   };
 }
-async function inCheese(page) {
-  await heading(page, 'Inside the cheese wheel');
-  await page.locator('#cheese').waitFor({ state: 'visible' });
-  for (const id of ['sky', 'space', 'site', 'coordinates', 'clock-panel', 'sky-panel']) {
+const solarPicker = page => page.getByRole('combobox', { name: 'Center on a Solar System body' });
+async function inSolar(page) {
+  await heading(page, 'Solar System');
+  await page.locator('#space').waitFor({ state: 'visible' });
+  for (const id of ['cheese', 'sky', 'site', 'coordinates', 'sky-panel']) {
     assert.equal(await page.locator(`#${id}`).isVisible(), false, id);
   }
+}
+async function earthEntry(page, name, interaction = 'click') {
+  await openPanel(page, 'Location');
+  await button(page, name)[interaction]();
+}
+async function inEarthSky(page) {
+  await heading(page, 'Surface sky');
+  const sky = page.locator('#sky');
+  await sky.waitFor({ state: 'visible' });
+  await page.waitForFunction(() => {
+    const sky = document.getElementById('sky');
+    return getComputedStyle(sky).opacity === '1' && sky.getContext('2d').getImageData(0, 0, 1, 1).data[3] === 255;
+  });
+  for (const id of ['space', 'solar-welcome', 'solar-body', 'solar-labels', 'zoom', 'view-badge']) {
+    assert.equal(await page.locator(`#${id}`).isVisible(), false, id);
+  }
+}
+async function fallback(page) {
+  await heading(page, 'Earth location');
+  for (const id of ['cheese', 'space', 'solar-welcome']) assert.equal(await page.locator(`#${id}`).isVisible(), false);
   for (const name of ['Use my location', 'Pick a place', 'Try demo sky']) {
     assert.ok(await button(page, name).isEnabled(), name);
   }
@@ -108,13 +136,179 @@ async function chooseCity(page, name) {
   await page.locator('#site').getByText(name, { exact: true }).waitFor({ state: 'attached' });
 }
 
+const captureSolar = (page, name) => captureLayout(page, name, process.env.SOLAR_SCREENSHOTS);
+
+// Compare actual marker pixels against independently sampled positions, not the app's projection.
+async function solarMarkerPixels(page, span, checks) {
+  const image = await region(page).screenshot({ scale: 'css' });
+  const results = await page.evaluate(async ({ png, span, checks }) => {
+    const image = new Image(); image.src = `data:image/png;base64,${png}`; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0);
+    const scale = Math.min(image.width, image.height) / span;
+    return checks.map(([body, x, y, rgb]) => {
+      const px = Math.round(image.width / 2 + x * scale);
+      const py = Math.round(image.height / 2 - y * scale);
+      return [body, [...ctx.getImageData(px, py, 1, 1).data.slice(0, 3)], rgb];
+    });
+  }, { png: image.toString('base64'), span, checks });
+  for (const [body, actual, expected] of results) assert.deepEqual(actual, expected, body);
+}
+const solarColors = {
+  Sun: [255, 205, 119], Mercury: [191, 193, 203], Venus: [234, 193, 150],
+  Earth: [116, 191, 235], Mars: [238, 150, 127], Pluto: [208, 186, 196],
+};
+const solarChecks = names => names.map(body => {
+  const xy = body === 'Sun' ? [0, 0] : solarReference[0][1].find(row => row[0] === body).slice(2, 4);
+  return [body, ...xy, solarColors[body]];
+});
+
+test('fresh live Solar System opens and reloads without cheese; keyboard dismissal and picking preserve playback', async t => {
+  const { page, errors, requests } = await opened(t, { viewport: { width: 1220, height: 900 } }, controlledFrames, false);
+  const frame = async date => page.evaluate(date => {
+    window.setWallTime(date); window.stepFrames(1, 1000);
+  }, date);
+  await inSolar(page);
+  const welcome = page.getByRole('region', { name: 'Welcome to the Solar System' });
+  await welcome.waitFor();
+  const picker = solarPicker(page);
+  assert.equal(await picker.inputValue(), 'Sun');
+  assert.deepEqual(await picker.locator('option').allTextContents(),
+    ['Sun', 'Mercury', 'Venus', 'Earth', 'Mars', 'Jupiter', 'Saturn', 'Uranus', 'Neptune', 'Pluto (dwarf planet)']);
+  await frame(fixed);
+  await solarMarkerPixels(page, 112, solarChecks(['Sun', 'Pluto']));
+  await openPanel(page, 'Time');
+  assert.ok(await button(page, 'Pause').isEnabled());
+  await page.getByLabel('Playback speed').selectOption('3600');
+  await button(page, 'Close Time').click();
+  await button(page, 'Explore').press('Enter');
+  assert.ok(await picker.evaluate(el => el === document.activeElement && el.matches(':focus-visible')));
+  await welcome.waitFor({ state: 'hidden' });
+  await frame('2024-04-08T12:00:01.000Z');
+  assert.equal(await clock(page), '2024-04-08T13:00:00.000Z');
+  await picker.press('p');
+  assert.equal(await picker.inputValue(), 'Pluto');
+  await frame('2024-04-08T12:00:02.000Z');
+  assert.equal(await clock(page), '2024-04-08T14:00:00.000Z');
+  await solarMarkerPixels(page, 1, [['Pluto', 0, 0, solarColors.Pluto]]);
+  await button(page, 'Full system').press('Enter');
+  assert.equal(await picker.inputValue(), 'Sun');
+  await page.getByText('112 AU across short side · Markers enlarged').waitFor();
+  await earthEntry(page, 'Try demo sky');
+  // Revealing Telescope changes the stage height. Let native layout deliver
+  // the resize, then step the controlled frames through buffer clear and paint.
+  await region(page).evaluate(view => new Promise(resolve => {
+    const observer = new ResizeObserver(() => { observer.disconnect(); resolve(); });
+    observer.observe(view);
+  }));
+  await page.evaluate(() => window.stepFrames(2, 0));
+  await inEarthSky(page);
+  assert.ok(await region(page).evaluate(el => el === document.activeElement));
+  assert.equal(await clock(page), '2024-04-08T14:00:00.000Z');
+  assert.equal(await page.getByLabel('Playback speed').inputValue(), '3600');
+  assert.deepEqual(requests, ['', 'styles.css', 'app.js'].map(path => ['GET', url + path]));
+  await page.reload();
+  await inSolar(page);
+  await welcome.waitFor();
+  assert.equal(await picker.inputValue(), 'Sun');
+  assert.deepEqual(errors, []);
+});
+
+test('Escape dismisses the visible welcome from body focus without taking over other controls', async t => {
+  const { page, errors } = await opened(t, {});
+  await inSolar(page);
+  const welcome = page.getByRole('region', { name: 'Welcome to the Solar System' });
+  await welcome.waitFor();
+  assert.equal(await page.evaluate(() => document.activeElement.tagName), 'BODY');
+  await page.keyboard.press('Escape');
+  assert.equal(await welcome.isVisible(), false, 'Escape from body dismisses the welcome');
+  assert.ok(await solarPicker(page).evaluate(el => el === document.activeElement && el.matches(':focus-visible')));
+
+  await page.reload();
+  await welcome.waitFor();
+  await solarPicker(page).press('Escape');
+  assert.equal(await welcome.isVisible(), true, 'the native picker keeps its Escape behavior');
+  await openPanel(page, 'Time');
+  await button(page, 'Close Time').press('Escape');
+  await welcome.waitFor();
+  assert.ok(await button(page, 'Time').evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Escape');
+  assert.equal(await welcome.isVisible(), false);
+  assert.ok(await button(page, 'Time').evaluate(el => el === document.activeElement));
+  assert.deepEqual(errors, []);
+});
+
+test('solar render work is bounded and paused clock edits repaint without waiting for playback', async t => {
+  const { page, errors } = await opened(t, { viewport: { width: 390, height: 664 } }, controlledFrames, false);
+  const draws = (count, delta) => page.evaluate(([count, delta]) => {
+    window.solarDraws = 0; window.stepFrames(count, delta);
+    return window.solarDraws;
+  }, [count, delta]);
+  assert.equal(await draws(3, 10), 10, 'all ten markers draw on startup and not again within the live second');
+  await openPanel(page, 'Time');
+  await page.getByLabel('Playback speed').selectOption('3600');
+  const accelerated = await draws(100, 10);
+  t.diagnostic(`At 3600×: ${accelerated / 10} map paints over 100 frames spanning 1 second`);
+  assert.equal(accelerated, 200, 'one ten-marker render every 50 ms at accelerated playback');
+  await button(page, 'Pause').click();
+  // Flush the pending instant from the Pause click before measuring idle work.
+  await draws(1, 1);
+  assert.equal(await draws(100, 10), 0, 'paused view does no WebGL work');
+  await page.getByLabel('Enter local date').fill('2040-01-01');
+  assert.equal(await draws(1, 1), 10, 'editing while paused draws on the very next frame');
+  assert.match(await clock(page), /^2040-01-01T/);
+  await button(page, 'Close Time').click();
+  await button(page, 'Explore').click();
+  await button(page, 'Inner planets').click();
+  assert.ok(await draws(1, 1) > 0, 'zoom repaints without another time change');
+  assert.deepEqual(errors, []);
+});
+
+for (const phone of [false, true]) test(`true-distance Solar System markers and zoom on ${phone ? 'phone' : 'desktop'}`, async t => {
+  const { page, errors } = await opened(t, phone ?
+    { ...devices['iPhone 13'], viewport: { width: 390, height: 664 } } :
+    { viewport: { width: 1220, height: 900 } });
+  const act = phone ? 'tap' : 'click';
+  await inSolar(page);
+  await captureSolar(page, `${phone ? 'phone' : 'desktop'}-welcome`);
+  await button(page, 'Explore')[act]();
+  await solarMarkerPixels(page, 112, solarChecks(['Sun', 'Pluto']));
+  await captureSolar(page, `${phone ? 'phone' : 'desktop'}-full`);
+  await button(page, 'Inner planets')[act]();
+  await solarMarkerPixels(page, 3.7, solarChecks(['Sun', 'Mercury', 'Venus', 'Earth', 'Mars']));
+  await captureSolar(page, `${phone ? 'phone' : 'desktop'}-inner`);
+  const badge = page.locator('#view-badge');
+  if (phone) {
+    for (const target of [solarPicker(page), button(page, 'Full system'), button(page, 'Zoom in'), button(page, 'Zoom out')]) {
+      const { width, height } = await target.boundingBox();
+      assert.ok(width >= 44 && height >= 44);
+    }
+    const session = await page.context().newCDPSession(page);
+    const { x, y } = await region(page).boundingBox();
+    await touchGesture(session, [[[x + 110, y + 120], [x + 190, y + 120]], [[x + 70, y + 120], [x + 230, y + 120]]]);
+    await badge.getByText(/^1.85 AU/).waitFor();
+    await solarPicker(page).tap();
+    // Native OS chooser contents are not scriptable in emulated Chromium.
+    await solarPicker(page).selectOption('Earth');
+    await captureSolar(page, 'phone-earth-centered');
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  } else {
+    await wheelScene(page, 100);
+    await badge.getByText(/^4.52 AU/).waitFor();
+  }
+  await button(page, 'Full system')[act]();
+  await solarMarkerPixels(page, 112, solarChecks(['Sun', 'Pluto']));
+  assert.deepEqual(errors, []);
+});
+
 test('desktop viewport panels open and dismiss without resetting aim or paused time', async t => {
   const { page, errors } = await opened(t, { viewport: { width: 1220, height: 900 }, reducedMotion: 'reduce' });
   const location = button(page, 'Location');
-  await inCheese(page);
-  assert.equal(await location.getAttribute('aria-expanded'), 'true');
+  await inSolar(page);
+  assert.equal(await location.getAttribute('aria-expanded'), 'false');
   await captureLayout(page, 'desktop-first-visit');
-  await button(page, 'Try demo sky').click();
+  await earthEntry(page, 'Try demo sky');
   assert.equal(await location.getAttribute('aria-expanded'), 'false');
   const scene = region(page);
   const before = await scene.boundingBox();
@@ -175,9 +369,10 @@ test('desktop viewport panels open and dismiss without resetting aim or paused t
 
 test('phone panels stay in the viewport and scroll without changing telescope zoom', async t => {
   const { page, errors } = await opened(t, { ...devices['iPhone 13'], defaultBrowserType: undefined, reducedMotion: 'reduce' });
-  await inCheese(page);
+  await inSolar(page);
   await captureLayout(page, 'phone-first-visit');
-  await button(page, 'Try demo sky').tap();
+  await earthEntry(page, 'Try demo sky', 'tap');
+  await inEarthSky(page);
   const scene = region(page);
   await captureLayout(page, 'phone-earth-collapsed');
   const bounds = await scene.boundingBox();
@@ -257,7 +452,7 @@ test('mobile canvas buffers resize once per effective size and ignore unchanged 
   };
 
   await assertBuffers(2);
-  await button(page, 'Try demo sky').tap();
+  await earthEntry(page, 'Try demo sky', 'tap');
   await openPanel(page, 'Time');
   await button(page, 'Pause').tap();
   await button(page, 'Close Time').tap();
@@ -365,7 +560,7 @@ test('the scene keeps its mode-specific accessible description when View closes'
     await button(page, 'Close View').click();
     assert.equal(await description(), closed);
   }
-  await check(/look around inside the wheel/);
+  await check(/Use the body picker/);
   await openPanel(page, 'Location');
   await button(page, 'Try demo sky').click();
   await check(/Open Telescope/);
@@ -378,7 +573,7 @@ test('the scene keeps its mode-specific accessible description when View closes'
   assert.deepEqual(errors, []);
 });
 
-test('granted permission still starts in the wheel; only an explicit request applies browser coordinates', async t => {
+test('granted permission still starts in the Solar System; only an explicit request applies browser coordinates', async t => {
   const { page, errors, requests } = await opened(t, {
     permissions: ['geolocation'], geolocation: { latitude: 38.722, longitude: -9.139 },
   }, () => {
@@ -387,21 +582,13 @@ test('granted permission still starts in the wheel; only an explicit request app
     const original = api.getCurrentPosition.bind(api);
     api.getCurrentPosition = (...args) => { window.locationCalls++; original(...args); };
   });
-  await inCheese(page);
-  const room = region(page);
-  const interior = await room.screenshot();
-  await room.press('ArrowRight');
-  const afterKey = await room.screenshot();
-  assert.notDeepEqual(afterKey, interior);
-  const { x, y } = await room.boundingBox();
-  await drag(page, x + 160, y + 120, 110, 36);
-  assert.notDeepEqual(await room.screenshot(), afterKey);
+  await inSolar(page);
   assert.equal(await page.evaluate(() => window.locationCalls), 0);
 
   const selectedAt = '2024-04-08T12:04:05.000Z';
   await page.clock.setFixedTime(new Date(selectedAt));
-  await button(page, 'Use my location').click();
-  await heading(page, 'Surface sky');
+  await earthEntry(page, 'Use my location');
+  await inEarthSky(page);
   await page.locator('#site').getByText('Your location', { exact: true }).waitFor({ state: 'attached' });
   assert.equal(await page.locator('#coordinates').textContent(), '38.722°, -9.139°');
   assert.equal(await clock(page), selectedAt);
@@ -410,20 +597,20 @@ test('granted permission still starts in the wheel; only an explicit request app
   assert.deepEqual(requests, ['', 'styles.css', 'app.js'].map(path => ['GET', url + path]));
 
   await page.reload();
-  await inCheese(page);
+  await inSolar(page);
   assert.equal(await page.evaluate(() => window.locationCalls), 0);
   assert.deepEqual(errors, []);
 });
 
-test('place picker cancellation and invalid coordinates leave the wheel; a globe pin selects the first site', async t => {
+test('place picker cancellation and invalid coordinates preserve the Solar System; a globe pin selects the first site', async t => {
   const { page, errors } = await opened(t, {});
-  await button(page, 'Pick a place').click();
+  await earthEntry(page, 'Pick a place');
   await page.getByText('Enter coordinates', { exact: true }).click();
   await page.getByLabel('Latitude').fill('91');
   await page.getByLabel('Longitude').fill('20');
   await button(page, 'Set coordinates').click();
   assert.equal(await page.getByLabel('Latitude').evaluate(input => input.validity.rangeOverflow), true);
-  await inCheese(page);
+  await inSolar(page);
 
   await button(page, 'Place globe pin').click();
   await heading(page, 'Pick a globe location');
@@ -432,16 +619,24 @@ test('place picker cancellation and invalid coordinates leave the wheel; a globe
   await region(page).click({ position: { x: 12, y: 12 } });
   await page.getByRole('status').filter({ hasText: 'No Earth surface' }).waitFor();
   await region(page).press('Escape');
-  await inCheese(page);
+  await inSolar(page);
   assert.equal(await page.getByText(/No Earth surface/).isVisible(), false);
   await button(page, 'Cancel').click();
   assert.equal(await page.getByRole('searchbox').isVisible(), false);
-  await inCheese(page);
+  await inSolar(page);
 
   await button(page, 'Pick a place').click();
   await button(page, 'Place globe pin').click();
+  await page.waitForFunction(() => document.getElementById('sky').style.opacity === '0');
+  await page.evaluate(() => {
+    window.addEventListener('keydown', () => {
+      const sky = document.getElementById('sky');
+      window.pinEntrySkyOpacity = getComputedStyle(sky).opacity;
+    }, { once: true });
+  });
   await region(page).press('Enter');
-  await heading(page, 'Surface sky');
+  assert.equal(await page.evaluate(() => window.pinEntrySkyOpacity), '1', 'first pin must not inherit the globe fade');
+  await inEarthSky(page);
   assert.equal(await page.locator('#site').textContent(), 'Globe pin');
   assert.equal(await clock(page), fixed);
   assert.deepEqual(errors, []);
@@ -453,28 +648,28 @@ test('denial, browser errors and app deadline leave usable exits; timed-out and 
     navigator.geolocation.getCurrentPosition = (resolve, reject) => window.locationRequests.push({ resolve, reject });
   });
   await page.clock.install({ time: new Date(fixed) });
-  const locate = () => button(page, 'Use my location').click();
+  const locate = () => earthEntry(page, 'Use my location');
   const status = text => page.getByRole('status').filter({ hasText: text }).waitFor();
   await locate();
   assert.equal(await button(page, 'Locating…').isDisabled(), true);
   await page.evaluate(() => window.locationRequests[0].reject({ code: 1 }));
   await status(/not granted/);
-  await inCheese(page);
+  await inSolar(page);
 
   await locate();
   await page.evaluate(() => window.locationRequests[1].reject({ code: 2 }));
   await status(/could not determine/);
-  await inCheese(page);
+  await inSolar(page);
 
   await locate();
   await page.evaluate(() => window.locationRequests[2].resolve({ coords: { latitude: -91, longitude: 0 } }));
   await status(/invalid position/);
-  await inCheese(page);
+  await inSolar(page);
 
   await locate();
   await page.clock.fastForward(10000);
   await status(/timed out/);
-  await inCheese(page);
+  await inSolar(page);
 
   await locate();
   await page.evaluate(() => window.locationRequests[3].resolve({ coords: { latitude: 1, longitude: 2 } }));
@@ -500,7 +695,7 @@ test('desktop project-subpath journey: time, sky, privacy, continuous flight, gl
     navigator.geolocation.getCurrentPosition = (_, reject) => { window.locationCalls++; reject({ code: 1 }); };
   });
   assert.equal(await page.evaluate(() => window.locationCalls), 0);
-  await button(page, 'Try demo sky').click();
+  await earthEntry(page, 'Try demo sky');
   await page.locator('#site').getByText('Reykjavík · demo sky', { exact: true }).waitFor({ state: 'attached' });
   assert.equal(await page.evaluate(() => window.locationCalls), 0);
   await openPanel(page, 'Time');
@@ -587,7 +782,7 @@ test('desktop project-subpath journey: time, sky, privacy, continuous flight, gl
 });
 
 async function orbitFromCoordinates(page, latitude, longitude) {
-  await button(page, 'Pick a place').click();
+  await earthEntry(page, 'Pick a place');
   await page.getByText('Enter coordinates', { exact: true }).click();
   await page.getByLabel('Latitude').fill(latitude);
   await page.getByLabel('Longitude').fill(longitude);
@@ -603,11 +798,19 @@ async function orbitFromCoordinates(page, latitude, longitude) {
 
 function watchOrbitBake() {
   const trace = window.orbitBake = { reads: 0, frameReads: 0, uploads: 0, firstDraw: null };
-  let inFrame = false, orbitContext;
+  let inFrame = false, orbitContext, cruiseStart;
+  let uploaded;
+  window.bothOrbitAtlasesUploaded = new Promise(resolve => { uploaded = resolve; });
   window.orbitContextLost = () => orbitContext?.isContextLost();
   const request = window.requestAnimationFrame;
   window.requestAnimationFrame = callback => request(now => {
     inFrame = true;
+    // Freeze only the ride's RAF timeline in the atlas-reuse case. Both globes
+    // stay in the cruise shot while real time and the bake tasks keep running.
+    if (window.holdRideInCruise && !document.getElementById('rocket-ride').hidden) {
+      cruiseStart ??= now;
+      now = Math.min(now, cruiseStart + 4500);
+    }
     try { callback(now); } finally { inFrame = false; }
   });
   const read = CanvasRenderingContext2D.prototype.getImageData;
@@ -624,13 +827,16 @@ function watchOrbitBake() {
   };
   const upload = WebGL2RenderingContext.prototype.texSubImage2D;
   WebGL2RenderingContext.prototype.texSubImage2D = function (...args) {
-    if (args[4] === 1024 && args[5] === 512 && ArrayBuffer.isView(args[8])) trace.uploads++;
-    return upload.apply(this, args);
+    const result = upload.apply(this, args);
+    if (args[4] === 1024 && args[5] === 512 && ArrayBuffer.isView(args[8]) && ++trace.uploads === 4) uploaded();
+    return result;
   };
   const draw = WebGL2RenderingContext.prototype.drawElements;
   WebGL2RenderingContext.prototype.drawElements = function (...args) {
     orbitContext ??= this;
-    trace.firstDraw ??= { reads: trace.reads, uploads: trace.uploads };
+    if (!document.getElementById('viewport').classList.contains('solar')) {
+      trace.firstDraw ??= { reads: trace.reads, uploads: trace.uploads };
+    }
     return draw.apply(this, args);
   };
 }
@@ -676,7 +882,7 @@ test('orbit Earth keeps the Caspian water surrounded by land after unwrapping Eu
 
 test('first lift-off paints before preparing either clay atlas', async t => {
   const { page } = await opened(t, { reducedMotion: 'reduce' }, watchOrbitBake);
-  await button(page, 'Try demo sky').click();
+  await earthEntry(page, 'Try demo sky');
   assert.equal(await page.evaluate(() => window.orbitBake.reads), 0);
   await openPanel(page, 'Travel');
   await button(page, 'Lift off ↗').click();
@@ -691,12 +897,17 @@ test('first lift-off paints before preparing either clay atlas', async t => {
 });
 
 test('a ride before orbit draws immediately, then orbit reuses both uploaded clay atlases', { timeout: 35000 }, async t => {
-  const { page, errors, requests } = await opened(t, { viewport: { width: 1220, height: 900 } }, watchOrbitBake);
+  // Keep desktop framing but rasterize fewer pixels in SwiftShader. This test
+  // checks upload order and reuse; the ride buffer dimensions are tested separately.
+  const { page, errors, requests } = await opened(t, {
+    viewport: { width: 1220, height: 900 }, deviceScaleFactor: .65,
+  }, watchOrbitBake);
   await manualSite(page, '23', '-26');
+  await page.evaluate(() => { window.holdRideInCruise = true; });
   await button(page, 'Travel').click();
   await button(page, 'Apollo 11 · Near side').click();
   await rocket(page).waitFor({ state: 'visible' });
-  await page.waitForFunction(() => window.orbitBake.uploads >= 4, null, { timeout: 16000 });
+  await page.evaluate(() => window.bothOrbitAtlasesUploaded);
   assert.deepEqual(await page.evaluate(() => window.orbitBake), {
     reads: 1, frameReads: 0, uploads: 4, firstDraw: { reads: 0, uploads: 0 },
   });
@@ -719,7 +930,7 @@ test('a ride before orbit draws immediately, then orbit reuses both uploaded cla
 
 test('the observer-free pin preview redraws itself when Earth relief is ready', async t => {
   const { page } = await opened(t, {}, watchOrbitBake);
-  await button(page, 'Pick a place').click();
+  await earthEntry(page, 'Pick a place');
   await button(page, 'Place globe pin').click();
   await heading(page, 'Pick a globe location');
   await page.waitForFunction(() => window.orbitBake.uploads >= 2);
@@ -730,7 +941,7 @@ test('the observer-free pin preview redraws itself when Earth relief is ready', 
 test('a failed Earth atlas keeps orbit and pinning available while the Moon atlas finishes', async t => {
   const { page, errors } = await opened(t, { reducedMotion: 'reduce' }, watchOrbitBake);
   await page.evaluate(() => { window.orbitBakeFault = 'readback'; });
-  await button(page, 'Try demo sky').click();
+  await earthEntry(page, 'Try demo sky');
   await openPanel(page, 'Time');
   await button(page, 'Pause').click();
   await openPanel(page, 'Travel');
@@ -756,7 +967,7 @@ test('a failed Earth atlas keeps orbit and pinning available while the Moon atla
 test('actual WebGL context loss during atlas baking still disables orbit', async t => {
   const { page, errors } = await opened(t, { reducedMotion: 'reduce' }, watchOrbitBake);
   await page.evaluate(() => { window.orbitBakeFault = 'context-loss'; });
-  await button(page, 'Try demo sky').click();
+  await earthEntry(page, 'Try demo sky');
   await openPanel(page, 'Travel');
   await button(page, 'Lift off ↗').click();
   await page.getByText(/The 3D globe needs WebGL 2/).waitFor();
@@ -777,7 +988,7 @@ test('emulated phone: touch drag/pinch/orbit/return, no overflow, no stale locat
     };
   });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  await inCheese(page);
+  await inSolar(page);
   const session = await page.context().newCDPSession(page);
   async function locate(requestCount) {
     await openPanel(page, 'Location');
@@ -785,11 +996,6 @@ test('emulated phone: touch drag/pinch/orbit/return, no overflow, no stale locat
     await button(page, 'Locating…').waitFor({ timeout: 5000 });
     assert.equal(await page.evaluate(() => window.locationRequests.length), requestCount);
   }
-  await button(page, 'Location').tap();
-  const bounds = await region(page).boundingBox(), x = bounds.x + 120, y = bounds.y + 120;
-  const interior = await region(page).screenshot();
-  await touchGesture(session, [[[x, y]], [[x + 50, y + 22]]]);
-  assert.notDeepEqual(await region(page).screenshot(), interior);
   await locate(1);
   await button(page, 'Pick a place').tap();
   await chooseCity(page, 'Sydney');
@@ -849,20 +1055,22 @@ test('WebGL unavailable leaves working sky, clock and manual location', async t 
     };
     Object.defineProperty(navigator, 'geolocation', { value: undefined });
   });
-  await inCheese(page);
+  await fallback(page);
   // Sample after first paint so moving the same bake into the first frame cannot pass.
   await region(page).screenshot();
   const textureEllipses = await page.evaluate(() => window.textureEllipses);
   t.diagnostic(`Startup offscreen ellipse draws: ${textureEllipses}`);
   assert.ok(textureEllipses <= 2000, `startup texture exceeds the 2000-ellipse budget: ${textureEllipses}`);
   assert.match(await page.locator('#compatibility').textContent(), /needs WebGL 2/);
+  await captureSolar(page, 'desktop-no-webgl');
   await captureLayout(page, 'desktop-no-webgl');
   await button(page, 'Use my location').click();
   assert.match(await page.locator('#location-status').textContent(), /unavailable/);
-  await inCheese(page);
+  await fallback(page);
   await button(page, 'Pick a place').click();
   assert.equal(await button(page, 'Place globe pin').isDisabled(), true);
   await chooseCity(page, 'London');
+  await inEarthSky(page);
   await openPanel(page, 'Time');
   await page.locator('#zone').getByText(/Europe\/London/).waitFor();
   assert.ok(await button(page, 'Telescope').isEnabled());
@@ -872,7 +1080,7 @@ test('WebGL unavailable leaves working sky, clock and manual location', async t 
   assert.equal(await button(page, 'Apollo 11 · Near side').isVisible(), false);
   assert.match(await page.locator('#compatibility').textContent(), /Lunar travel from Earth is unavailable/);
   await page.reload();
-  await inCheese(page);
+  await fallback(page);
   await button(page, 'Pick a place').click();
   await page.getByText('Enter coordinates', { exact: true }).click();
   await page.getByLabel('Latitude').fill('25.125');
@@ -881,7 +1089,7 @@ test('WebGL unavailable leaves working sky, clock and manual location', async t 
   await heading(page, 'Surface sky');
   assert.equal(await page.locator('#coordinates').textContent(), '25.125°, -45.500°');
   await page.reload();
-  await inCheese(page);
+  await fallback(page);
   await button(page, 'Try demo sky').click();
   await page.locator('#site').getByText(/Reykjavík · demo sky/).waitFor({ state: 'attached' });
   assert.deepEqual(errors, []);
@@ -906,7 +1114,7 @@ test('globe bounds playback samples without delaying camera input or paused edit
   const frames = (count = 1, delta = 10) => page.evaluate(([n, ms]) => window.stepFrames(n, ms), [count, delta]);
   const badge = page.locator('#view-badge');
   const speed = page.getByLabel('Playback speed');
-  await button(page, 'Try demo sky').dispatchEvent('click');
+  await earthEntry(page, 'Try demo sky');
   await openPanel(page, 'Travel');
   await button(page, 'Lift off ↗').dispatchEvent('click');
   await frames();
@@ -950,7 +1158,7 @@ test('playback changes speed continuously and Now restores live wall time', asyn
   const frame = ms => page.evaluate(delta => window.stepFrames(1, delta), ms);
   const wall = iso => page.evaluate(time => window.setWallTime(time), iso);
   const speed = page.getByLabel('Playback speed');
-  await button(page, 'Try demo sky').dispatchEvent('click');
+  await earthEntry(page, 'Try demo sky');
   await wall('2024-04-08T12:00:04.000Z');
   await frame(10);
   assert.equal(await clock(page), '2024-04-08T12:00:04.000Z');
@@ -982,7 +1190,7 @@ test('playback changes speed continuously and Now restores live wall time', asyn
 
 test('editing civil time pauses running playback at the selected instant', async t => {
   const { page, errors } = await opened(t, {}, controlledFrames, false);
-  await button(page, 'Try demo sky').dispatchEvent('click');
+  await earthEntry(page, 'Try demo sky');
   await openPanel(page, 'Time');
   await page.getByLabel('Playback speed').selectOption('60');
   await page.getByLabel('Enter local time').fill('12:30:00');
@@ -995,7 +1203,7 @@ test('editing civil time pauses running playback at the selected instant', async
 
 test('playback stops at the range end and a site change preserves that instant', async t => {
   const { page, errors } = await opened(t, {}, controlledFrames, false);
-  await button(page, 'Try demo sky').dispatchEvent('click');
+  await earthEntry(page, 'Try demo sky');
   await openPanel(page, 'Time');
   await page.getByLabel('Enter local date').fill('2100-12-31');
   await page.getByLabel('Enter local time').fill('23:59:59');
@@ -1064,7 +1272,7 @@ async function assertAperture(page, normal) {
 }
 
 async function manualSite(page, lat, lon) {
-  await button(page, 'Pick a place').click();
+  await earthEntry(page, 'Pick a place');
   await page.getByText('Enter coordinates', { exact: true }).click();
   await page.getByLabel('Latitude').fill(lat);
   await page.getByLabel('Longitude').fill(lon);
@@ -1181,7 +1389,7 @@ test('phone lunar foreground changes with the Sun without atmospheric warmth or 
     ...devices['iPhone 13'], viewport: { width: 390, height: 664 }, reducedMotion: 'reduce',
   });
   await page.clock.setFixedTime(new Date('2025-01-06T00:00:00.000Z'));
-  await button(page, 'Try demo sky').tap();
+  await earthEntry(page, 'Try demo sky', 'tap');
   await openPanel(page, 'Time');
   await button(page, 'Pause').tap();
   await openPanel(page, 'Travel');
@@ -1379,7 +1587,7 @@ test('desktop telescope enlarges the centered lunar Earth without changing its p
   const { page, errors } = await opened(t, { viewport: { width: 1220, height: 900 }, reducedMotion: 'reduce' });
   await page.clock.setFixedTime(new Date('2025-01-06T00:00:00.000Z'));
   assert.equal(await telescope(page).isVisible(), false);
-  await button(page, 'Pick a place').click();
+  await earthEntry(page, 'Pick a place');
   await chooseCity(page, 'Tokyo');
   await openPanel(page, 'Time');
   await button(page, 'Pause').click();
@@ -1499,7 +1707,7 @@ test('trackpad-style Ctrl+wheel zooms only over the active telescope scene', asy
   const scene = region(page);
   const wheelNotCanceled = (target, modifiers) => target.evaluate((el, modifiers) =>
     el.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true, ...modifiers })), modifiers);
-  await button(page, 'Try demo sky').click();
+  await earthEntry(page, 'Try demo sky');
   assert.equal(await wheelNotCanceled(scene, { ctrlKey: true }), true, 'closed telescope leaves browser zoom alone');
   await button(page, 'Telescope').click();
   const slider = telescopeRange(page);
@@ -1534,7 +1742,7 @@ test('lift-off moves focus only if it hides a focused telescope control', async 
   const { page, errors } = await opened(t, { reducedMotion: 'reduce' });
   const scene = region(page);
   const liftOff = page.getByRole('button', { name: 'Lift off ↗', exact: true, includeHidden: true });
-  await button(page, 'Try demo sky').click();
+  await earthEntry(page, 'Try demo sky');
   await openPanel(page, 'Travel');
   await button(page, 'Telescope').press('Enter');
   await page.keyboard.press('Tab');
@@ -1562,7 +1770,7 @@ test('phone telescope works by touch during playback and cannot reveal far-side 
   const { page, errors } = await opened(t, {
     ...devices['iPhone 13'], defaultBrowserType: undefined, reducedMotion: 'reduce',
   });
-  await button(page, 'Try demo sky').tap();
+  await earthEntry(page, 'Try demo sky', 'tap');
   await page.waitForFunction(() => document.getElementById('bearing').textContent !== '');
   await openPanel(page, 'Time');
   assert.ok(await button(page, 'Pause').isVisible());
@@ -1692,7 +1900,7 @@ test('desktop lands at Apollo 11, renders two physical Earth phases, jumps in UT
   const { page, errors, requests } = await opened(t, { viewport: { width: 1220, height: 900 } });
   const first = '2025-01-06T00:00:00.000Z';
   await page.clock.setFixedTime(new Date(first));
-  await button(page, 'Pick a place').click();
+  await earthEntry(page, 'Pick a place');
   await chooseCity(page, 'Tokyo');
   await openPanel(page, 'Time');
   await button(page, 'Pause').click();
@@ -1757,7 +1965,7 @@ test('desktop lands at Apollo 11, renders two physical Earth phases, jumps in UT
 
 test('phone touch reaches the far side, looks around, and returns with a running clock; reduced motion is immediate', async t => {
   const { page, errors } = await opened(t, { ...devices['iPhone 13'], defaultBrowserType: undefined });
-  await button(page, 'Pick a place').tap();
+  await earthEntry(page, 'Pick a place', 'tap');
   await chooseCity(page, 'Sydney');
   await openPanel(page, 'Time');
   await page.getByLabel('Playback speed').selectOption('3600');

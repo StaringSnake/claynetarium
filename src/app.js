@@ -1,8 +1,8 @@
-import { skyAt, solarEvents, spaceAt, EARTH_KM, RAD } from './astronomy.js';
+import { skyAt, solarEvents, solarBodies, solarSystemAt, spaceAt, EARTH_KM, RAD } from './astronomy.js';
 import { civilClock, dateText, timeText, offsetText, SECOND, DAY, FIRST_DAY, LAST_DAY } from './clock.js';
 import { cities, coordinateSite, demo, findCities } from './places.js';
-import { cheeseView } from './cheese-view.js';
 import { globeView } from './globe-view.js';
+import { solarView, FULL_SYSTEM, INNER_SYSTEM, CLOSEST_SYSTEM } from './solar-view.js';
 import { skyView } from './sky-view.js';
 import { lunarSites, lunarSkyAt, nextLunarSolarEvents } from './lunar.js';
 import { createPlayback } from './playback.js';
@@ -12,7 +12,6 @@ const $ = id => document.getElementById(id);
 const view = $('viewport');
 const skyCanvas = $('sky');
 const spaceCanvas = $('space');
-const cheeseCanvas = $('cheese');
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const wrap = degrees => (degrees % 360 + 360) % 360;
 const motion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -25,7 +24,10 @@ const telescopeControls = $('telescope-controls');
 let telescopeActive = false, telescopeMagnification = 1;
 const pointers = new Map();
 let dragged = false, telescopePinch = null;
-const cheese = { yaw: .38, pitch: -.02 };
+const solar = { focus: 0, radius: FULL_SYSTEM };
+const solarBody = $('solar-body'), welcome = $('solar-welcome'), explore = $('explore-solar');
+let welcomeDismissed = false;
+let solarPositions, solarInstant, solarSampleTime;
 const orbit = { theta: 0, latitude: 0, distance: 4.3, focus: 'earth', overview: false };
 const options = { glare: 1, labels: true, lines: true };
 const playback = createPlayback();
@@ -36,11 +38,13 @@ let sky, skySecond, space, spaceInstant, spaceSampleTime, shownDay, shownSecond;
 let pendingLocation = null, flight = null, mode = 'surface', pinning = false;
 let width, height, dpi, desktopRideBuffer, dirty = true;
 let resizeQueued = false;
-let globePreview, previewFrame = null;
+let solarRenderer;
 
 const panelToggles = ['location-toggle', 'time-toggle', 'travel-toggle', 'view-toggle'].map($);
 const panelFor = toggle => $(toggle.getAttribute('aria-controls'));
-let openPanel = panelToggles[0];
+let openPanel = null;
+
+function updateWelcome() { welcome.hidden = mode !== 'solar' || welcomeDismissed || Boolean(openPanel); }
 
 function showPanel(toggle, focus = true) {
   const previous = openPanel;
@@ -58,6 +62,7 @@ function showPanel(toggle, focus = true) {
   } else if (focus && previous) {
     (previous.hidden ? view : previous).focus({ preventScroll: true });
   }
+  updateWelcome();
 }
 
 for (const toggle of panelToggles) {
@@ -70,6 +75,13 @@ document.querySelector('.observatory').addEventListener('keydown', event => {
     showPanel(null);
   }
 });
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || event.defaultPrevented || welcome.hidden ||
+      event.target.closest?.('input, select, textarea, [contenteditable], dialog, [role="dialog"]')) return;
+  event.preventDefault();
+  const focused = document.activeElement;
+  dismissWelcome(focused === document.body || welcome.contains(focused));
+});
 
 function notice(id, message) {
   $(id).textContent = message;
@@ -77,26 +89,26 @@ function notice(id, message) {
 }
 
 function noGlobe() {
+  const needsLocation = !site;
   const interrupted = Boolean(ride);
-  globe = rocket = null; mode = 'surface'; flight = null; globePreview = null;
+  globe = rocket = solarRenderer = null; mode = 'surface'; flight = null;
   if (interrupted) cancelRide('3D was interrupted. You are still at the departure site and your clock was not reset.');
   showCompatibility();
   setPin(false);
+  if (needsLocation) showPanel($('location-toggle'), document.activeElement !== document.body);
 }
 
-const cheeseRenderer = cheeseView(cheeseCanvas);
 const skyRenderer = skyView(skyCanvas);
 let globe;
 if (skyRenderer) {
-  try { globe = globeView(spaceCanvas, noGlobe, () => { dirty = true; queuePreview(); }); }
+  try { globe = globeView(spaceCanvas, noGlobe, () => { dirty = true; }); }
   catch { globe = null; }
 }
-if (!globe) noGlobe();
 
 function showCompatibility() {
   notice('compatibility', site && !skyRenderer ?
     'This browser cannot draw the sky. Time, location and object readouts are still available.' :
-    !site && !cheeseRenderer ? 'This browser cannot draw the cheese interior. You can still choose a location.' :
+    !site && !globe ? 'The 3D Solar System needs WebGL 2. Choose an Earth location or try the demo sky.' :
     !globe ? 'The 3D globe needs WebGL 2. Lunar travel from Earth is unavailable; the Earth sky still works.' : '');
 }
 
@@ -137,10 +149,8 @@ function selectSite(next, message = '') {
   const firstSite = !site;
   if (firstSite || site.lat !== next.lat || site.lon !== next.lon) resetTelescope();
   // Capture the instant under the old clock before swapping civil rules.
-  if (firstSite) {
-    playback.startLive(Date.now(), performance.now());
-    mode = 'surface'; globePreview = null;
-  } else advance();
+  advance();
+  if (firstSite) mode = 'surface';
   cancelLocation();
   site = next;
   try { clock = civilClock(site.zone); }
@@ -158,17 +168,18 @@ function selectSite(next, message = '') {
   $('site').textContent = site.name;
   $('coordinates').textContent = `${site.lat.toFixed(3)}°, ${site.lon.toFixed(3)}°`;
   notice('location-status', message);
-  setPin(false);
   if (firstSite) {
-    for (const id of ['site', 'coordinates', 'time-toggle', 'sky-panel', 'place-picker']) $(id).hidden = false;
+    skyCanvas.style.opacity = '1'; // Do not carry the globe preview's fade into the first surface view.
+    for (const id of ['site', 'coordinates', 'sky-panel', 'place-picker']) $(id).hidden = false;
     for (const id of ['choose-site', 'pick-place', 'demo', 'cancel-place']) $(id).hidden = true;
-    $('location-toggle').classList.remove('primary');
+    $('title').textContent = 'Earth Sky';
+    $('clock-context').textContent = 'Observer local time';
     if (openPanel === $('location-toggle')) showPanel(null, false);
     showCompatibility();
     updateReadouts();
-    if (!openPanel) view.focus({ preventScroll: true });
-    requestAnimationFrame(tick);
   }
+  setPin(false); // Synchronize the scene and invalidate its paint after the site transition.
+  if (firstSite && !openPanel) view.focus({ preventScroll: true });
 }
 
 function aimSky() {
@@ -179,6 +190,7 @@ function aimSky() {
 }
 
 function updateSky() {
+  if (!site) return;
   const second = Math.floor(playback.instant / SECOND);
   if (skySecond === second) return;
   skySecond = second;
@@ -196,15 +208,28 @@ function updateSpace(real = performance.now()) {
   return true;
 }
 
+function updateSolar(real) {
+  const { instant, playing } = playback;
+  // At live speed sub-second orbital motion is far below a pixel, even at maximum zoom.
+  if (solarInstant === instant || (playing && playback.rate === 1 &&
+      Math.floor(solarInstant / SECOND) === Math.floor(instant / SECOND))) return false;
+  if (playing && solarInstant !== undefined && real - solarSampleTime < SPACE_SAMPLE_INTERVAL) return false;
+  solarPositions = solarSystemAt(instant);
+  solarInstant = instant;
+  solarSampleTime = real;
+  return true;
+}
+
 function updateReadouts() {
-  if (shownSecond === skySecond) return;
   const { instant } = playback;
+  const second = Math.floor(instant / SECOND);
+  if (shownSecond === second) return;
   const { day, seconds, offset } = clock.parts(instant);
   const date = dateText(day), localTime = timeText(seconds);
-  shownSecond = skySecond;
+  shownSecond = second;
   $('local-clock').textContent = `${date} · ${localTime}`;
   $('local-clock').dateTime = new Date(instant).toISOString();
-  $('zone').textContent = !lunarSite && site.fallback ? 'UTC · no reliable civil zone for these coordinates' : `${clock.zone} · ${offsetText(offset)}`;
+  $('zone').textContent = !lunarSite && site?.fallback ? 'UTC · no reliable civil zone for these coordinates' : `${clock.zone} · ${offsetText(offset)}`;
   $('date-dial').value = clamp(day, FIRST_DAY, LAST_DAY);
   $('date-dial').setAttribute('aria-valuetext', date);
   $('time-dial').value = seconds;
@@ -212,6 +237,7 @@ function updateReadouts() {
   // Do not rewrite fields while typing; the change handlers normalize committed values.
   if (document.activeElement !== $('date-edit')) $('date-edit').value = date;
   if (document.activeElement !== $('time-edit')) $('time-edit').value = localTime;
+  if (!site) return;
   if ($('directions').parentElement.open) updateDirections();
   if (lunarSite) {
     $('earth-visibility').textContent = sky.earth.visible ?
@@ -283,7 +309,6 @@ function resize() {
   if (ride) rocket.resize(width, height, dpi, desktopRideBuffer);
   else globe?.resize(width, height, dpi);
   dirty = true;
-  queuePreview();
 }
 
 function queueResize() {
@@ -306,12 +331,13 @@ function watchPixelRatio() {
 
 function viewControls() {
   const inSpace = mode === 'globe';
+  const inSolar = mode === 'solar';
   const showTelescope = Boolean(site && skyRenderer && !inSpace && !flight && !ride);
   setTelescope(showTelescope && telescopeActive, showTelescope);
   $('rocket-ride').hidden = $('skip-ride').hidden = !ride;
   $('arrival-flag').hidden = !arrival || inSpace || Boolean(flight || ride);
   $('lunar-destinations').hidden = !globe || inSpace || Boolean(flight || ride || lunarSite);
-  $('view-name').textContent = !site ? (inSpace ? 'Pick a globe location' : 'Inside the cheese wheel') :
+  $('view-name').textContent = !site ? (inSolar ? 'Solar System' : inSpace ? 'Pick a globe location' : 'Earth location') :
     ride ? 'Rocket ride' : flight ? (flight.toSpace ? 'Lifting off' : 'Returning to surface') :
       inSpace ? 'Globe view' : lunarSite ? 'Lunar sky' : 'Surface sky';
   $('close-globe').hidden = Boolean(site) || !inSpace;
@@ -323,41 +349,68 @@ function viewControls() {
   $('return-earth').hidden = !lunarSite;
   if (openPanel?.hidden) showPanel(null);
   $('pin').disabled = !globe || Boolean(flight || ride);
-  $('zoom').hidden = !inSpace || Boolean(flight || ride);
+  $('zoom').hidden = !(inSpace || inSolar) || Boolean(flight || ride);
+  $('solar-zoom-preset').hidden = solarBody.hidden = $('solar-labels').hidden = !inSolar;
+  if (!inSolar) for (const id of ['zoom-in', 'zoom-out']) $(id).removeAttribute('aria-disabled');
+  $('time-toggle').hidden = !site && !inSolar;
   $('orbit-tools').hidden = !site || !inSpace || Boolean(flight || ride);
   $('overview').setAttribute('aria-pressed', String(orbit.overview));
-  $('view-badge').hidden = !site || !inSpace || Boolean(flight || ride);
+  $('view-badge').hidden = !inSolar && (!site || !inSpace || Boolean(flight || ride));
   const help = ride ? 'Illustrative route, not to scale. The ride adds no simulation time.' :
     pinning ? 'Drag or use arrow keys to orbit. Tap Earth or press Enter to place a pin. Escape cancels.' :
-    inSpace ? 'Drag or use arrow keys to orbit. Pinch, scroll or use the zoom buttons.' :
+    inSolar ? 'Scroll, pinch or use the zoom buttons. Use the body picker to center a world.' :
+      inSpace ? 'Drag or use arrow keys to orbit. Pinch, scroll or use the zoom buttons.' :
       telescopeActive ? 'Drag or use arrow keys to aim. Scroll or pinch to zoom, or use the magnification slider.' :
         showTelescope ? 'Drag or use arrow keys to aim. Open Telescope to magnify the center of the view.' :
-        site ? 'Drag or use arrow keys to look around.' : 'Drag, swipe, or use arrow keys to look around inside the wheel.';
+         site ? 'Drag or use arrow keys to look around.' : 'Choose a location to open the Earth sky.';
   $('view-help').textContent = $('panel-view-help').textContent = help;
   $('pin-help').hidden = !pinning;
   if (pinning) $('pin-help').textContent = help;
-  spaceCanvas.hidden = !inSpace && !flight && !ride;
+  spaceCanvas.hidden = !inSolar && !inSpace && !flight && !ride;
   skyCanvas.hidden = !site || Boolean(ride) || (inSpace && !flight);
-  cheeseCanvas.hidden = Boolean(site) || inSpace;
-  if (!inSpace) $('view-badge').textContent = '';
+  if (!inSpace && !inSolar) $('view-badge').textContent = '';
+  view.classList.toggle('solar', inSolar);
+  if (inSolar) updateSolarZoomControls();
+  updateWelcome();
   dirty = true;
-  queuePreview();
 }
 
-// Before selecting a site there is no running simulation. Redraw previews only on demand.
-function drawPreview() {
-  if (!width || !height) return;
-  if (mode === 'globe') globe?.draw(globePreview, null, surface, orbit, 1);
-  else cheeseRenderer?.(cheese.yaw, cheese.pitch, width, height);
+function dismissWelcome(moveFocus) {
+  welcomeDismissed = true;
+  updateWelcome();
+  if (moveFocus) solarBody.focus({ preventScroll: true });
 }
 
-function queuePreview() {
-  if (site || previewFrame !== null) return;
-  previewFrame = requestAnimationFrame(() => {
-    previewFrame = null;
-    if (!site) drawPreview();
-  });
+function solarPresetRadius() {
+  const nearerFull = solar.radius > Math.sqrt(FULL_SYSTEM * INNER_SYSTEM);
+  return solar.focus === 0 && nearerFull ? INNER_SYSTEM : FULL_SYSTEM;
 }
+
+function updateSolarZoomControls() {
+  $('solar-zoom-preset').textContent = solarPresetRadius() === INNER_SYSTEM ? 'Inner planets' : 'Full system';
+  $('zoom-in').setAttribute('aria-disabled', String(solar.radius <= CLOSEST_SYSTEM));
+  $('zoom-out').setAttribute('aria-disabled', String(solar.radius >= FULL_SYSTEM));
+  const span = (2 * solar.radius).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  $('view-badge').textContent = `${span} AU across short side · Markers enlarged`;
+}
+
+function centerSolar(focus, radius) {
+  solar.focus = focus; solar.radius = radius;
+  solarBody.selectedIndex = focus;
+  updateSolarZoomControls();
+  dirty = true;
+}
+
+solarBody.replaceChildren(...solarBodies.map(body => new Option(body === 'Pluto' ? 'Pluto (dwarf planet)' : body, body)));
+solarBody.addEventListener('change', () => {
+  const focus = solarBody.selectedIndex;
+  if (focus < 0 || mode !== 'solar') return;
+  welcomeDismissed = true;
+  showPanel(null, false);
+  centerSolar(focus, focus === 0 ? FULL_SYSTEM : .5);
+});
+explore.addEventListener('click', () => dismissWelcome(true));
+$('solar-zoom-preset').addEventListener('click', () => centerSolar(0, solarPresetRadius()));
 
 function frameEarth() {
   updateSpace();
@@ -460,6 +513,14 @@ function setPin(enabled) {
 }
 
 function draw(real) {
+  if (!width || !height) return;
+  if (mode === 'solar') {
+    const changed = updateSolar(real);
+    if (dirty || changed) solarRenderer.draw(solarPositions, solar, width, height);
+    dirty = false;
+    return;
+  }
+  if (!site && mode !== 'globe') return;
   if (ride) {
     // Slow or backgrounded browsers can take longer, but must not jump over
     // touchdown or the burst. This does not affect the simulation clock.
@@ -485,12 +546,13 @@ function draw(real) {
     }
   }
   const spaceVisible = Boolean(flight) || mode === 'globe';
-  if (!width || !height) return;
-  const spaceChanged = spaceVisible && globe && updateSpace(real);
+  // The globe pin preview uses its entrance sample; the clock continues
+  // independently and the preview only repaints on input, resize or atlas readiness.
+  const spaceChanged = site && spaceVisible && globe && updateSpace(real);
   if (dirty || flight || spaceChanged) {
     if (spaceVisible && globe) {
       globe.draw(space, site, surface, orbit, progress);
-      if (mode === 'globe') {
+      if (site && mode === 'globe') {
         const badge = $('view-badge');
         const text = `${orbit.overview ? 'Not to scale' : 'True Earth–Moon scale'} · ${Math.round(Math.hypot(...space.moon) * EARTH_KM).toLocaleString('en-US')} km center to center`;
         if (badge.textContent !== text) badge.textContent = text;
@@ -541,8 +603,8 @@ $('locate').addEventListener('click', () => {
 });
 
 function closeGlobePreview() {
-  if (site || !globePreview) return;
-  globePreview = null; mode = 'surface'; setPin(false);
+  if (site || mode !== 'globe') return;
+  mode = 'solar'; setPin(false);
   showPanel($('location-toggle'), false);
   $('pin').focus();
 }
@@ -585,7 +647,7 @@ $('play').addEventListener('click', () => {
 });
 $('now').addEventListener('click', () => {
   playback.startLive(Date.now(), performance.now());
-  spaceInstant = undefined;
+  spaceInstant = solarInstant = undefined;
   lunarEvents = shownSecond = undefined;
   $('speed').value = String(playback.rate); playButton(); notice('clock-status', '');
 });
@@ -630,9 +692,11 @@ for (const event of ['sunrise', 'sunset']) {
 $('pin').addEventListener('click', () => {
   if (!site) {
     if (!globe) return;
-    if (globePreview) { closeGlobePreview(); return; }
-    globePreview = spaceAt(Date.now());
-    Object.assign(orbit, { theta: globePreview.spin, latitude: .18, distance: 4.3, focus: 'earth', overview: false });
+    if (mode === 'globe') { closeGlobePreview(); return; }
+    advance();
+    spaceInstant = undefined;
+    updateSpace();
+    Object.assign(orbit, { theta: space.spin, latitude: .18, distance: 4.3, focus: 'earth', overview: false });
     mode = 'globe'; setPin(true);
   } else if (mode === 'surface') fly(true, true);
   else {
@@ -655,10 +719,8 @@ $('moon-focus').addEventListener('click', () => {
 });
 
 function rotate(dx, dy) {
-  if (!site && mode === 'surface') {
-    cheese.yaw = (cheese.yaw - dx * .007) % (2 * Math.PI);
-    cheese.pitch = clamp(cheese.pitch + dy * .007, -1.4, 1.4);
-  } else if (mode === 'surface') {
+  if (mode === 'solar' || (!site && mode === 'surface')) return;
+  if (mode === 'surface') {
     const sensitivity = .22 / surface.magnification;
     surface.az = wrap(surface.az - dx * sensitivity);
     surface.alt = clamp(surface.alt + dy * sensitivity, -83, 83);
@@ -667,7 +729,6 @@ function rotate(dx, dy) {
     orbit.latitude = clamp(orbit.latitude + dy * .007, -1.55, 1.55);
   }
   dirty = true;
-  queuePreview();
 }
 function setTelescope(active, available = !telescope.hidden) {
   const hiding = !available ? telescope : !active ? telescopeControls : null;
@@ -726,9 +787,13 @@ function escapeTelescope(event) {
 telescope.addEventListener('keydown', escapeTelescope);
 
 function zoom(factor) {
+  if (mode === 'solar') {
+    const radius = clamp(solar.radius * factor, CLOSEST_SYSTEM, FULL_SYSTEM);
+    if (radius !== solar.radius) centerSolar(solar.focus, radius);
+    return;
+  }
   orbit.distance = clamp(orbit.distance * factor, orbit.focus === 'earth' ? 1.09 : .49, 150);
   dirty = true;
-  queuePreview();
 }
 $('zoom-in').addEventListener('click', () => zoom(.77));
 $('zoom-out').addEventListener('click', () => zoom(1.3));
@@ -740,8 +805,10 @@ view.addEventListener('wheel', event => {
     if (!event.cancelable || !event.deltaY) return;
     event.preventDefault();
     setMagnification(telescopeMagnification - event.deltaY * unit * WHEEL_MAGNIFICATION_PER_PIXEL);
-  } else if (mode === 'globe' && !event.ctrlKey && !event.metaKey) {
-    event.preventDefault(); zoom(Math.exp(clamp(event.deltaY * .002, -1, 1)));
+  } else if ((mode === 'solar' || mode === 'globe') && event.target === view && !event.ctrlKey && !event.metaKey) {
+    const unit = mode === 'solar' && event.deltaMode === 1 ? 16 :
+      mode === 'solar' && event.deltaMode === 2 ? height : 1;
+    event.preventDefault(); zoom(Math.exp(clamp(event.deltaY * unit * .002, -1, 1)));
   }
 }, { passive: false });
 view.addEventListener('keydown', event => {
@@ -749,7 +816,7 @@ view.addEventListener('keydown', event => {
   escapeTelescope(event);
   if (event.defaultPrevented) return;
   const keys = { ArrowLeft: [28, 0], ArrowRight: [-28, 0], ArrowUp: [0, 28], ArrowDown: [0, -28] };
-  if (Object.hasOwn(keys, event.key)) { event.preventDefault(); rotate(...keys[event.key]); }
+  if (mode !== 'solar' && Object.hasOwn(keys, event.key)) { event.preventDefault(); rotate(...keys[event.key]); }
   if (event.key === 'Escape' && pinning) {
     event.preventDefault();
     if (!site) closeGlobePreview();
@@ -760,8 +827,7 @@ view.addEventListener('keydown', event => {
 
 function placePin(x, y) {
   // Resolve against the latest camera frame even if a click immediately follows an orbit.
-  if (site) draw(performance.now());
-  else drawPreview();
+  draw(performance.now());
   const hit = globe.pick(x, y);
   if (hit) selectSite(coordinateSite('Globe pin', hit.lat, hit.lon), 'Globe pin applied.');
   else notice('pin-status', 'No Earth surface at that point. Tap Earth to place the pin.');
@@ -794,7 +860,7 @@ view.addEventListener('pointermove', event => {
   if (pointers.size === 1) {
     // After a pinch, do not turn the last contact's release movement into aim.
     if (!telescopePinch) rotate(dx, dy);
-  } else if (telescopePinch || mode === 'globe') {
+  } else if (telescopePinch || mode === 'globe' || mode === 'solar') {
     const other = [...pointers.entries()].find(([id]) => id !== event.pointerId)[1];
     const nextGap = Math.hypot(next.x - other.x, next.y - other.y);
     if (telescopePinch) {
@@ -815,7 +881,17 @@ view.addEventListener('pointerup', event => {
 });
 for (const type of ['pointercancel', 'lostpointercapture']) view.addEventListener(type, event => pointers.delete(event.pointerId));
 
-listCities(); viewControls(); resize();
+clock = civilClock('UTC');
+playback.startLive(Date.now(), performance.now());
+updatePlaybackBounds();
+$('clock-context').textContent = 'Simulation time (UTC)';
+if (globe) {
+  solarRenderer = solarView(globe.renderer, $('solar-labels'));
+  mode = 'solar';
+  $('title').textContent = 'Solar System';
+} else noGlobe();
+listCities(); viewControls(); resize(); updateReadouts();
+requestAnimationFrame(tick);
 new ResizeObserver(queueResize).observe(view);
 window.addEventListener('resize', queueResize);
 watchPixelRatio();

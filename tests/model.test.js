@@ -1,16 +1,50 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DAY, FIRST_DAY, LAST_DAY, civilClock, dateText, offsetText } from '../src/clock.js';
-import { skyAt, solarEvents, spaceAt, EARTH_KM, MOON_KM } from '../src/astronomy.js';
+import { skyAt, solarEvents, solarBodies, solarSystemAt, spaceAt, EARTH_KM, MOON_KM } from '../src/astronomy.js';
+import { solarFrustum, FULL_SYSTEM, INNER_SYSTEM } from '../src/solar-view.js';
 import { cities, coordinateSite, findCities } from '../src/places.js';
 import { lunarSites, lunarSkyAt, solarLimbAltitude, nextLunarSolarEvents } from '../src/lunar.js';
 import { earthRows, apolloSun, solarBrackets } from './fixtures/lunar-horizons.js';
+import { solarReference } from './fixtures/solar-horizons.js';
 
 const day = value => Date.parse(value) / DAY;
 const city = name => cities.find(place => place.name === name);
 const iso = instant => new Date(instant).toISOString();
 const close = (actual, expected, tolerance, name) =>
   assert.ok(Math.abs(actual - expected) <= tolerance, `${name}: ${actual} not within ${tolerance} of ${expected}`);
+
+test('heliocentric ecliptic vectors agree with independent Horizons samples, including Pluto depth', () => {
+  for (const [date, rows] of solarReference) {
+    const positions = solarSystemAt(Date.parse(date));
+    assert.deepEqual(positions[0], [0, 0, 0]);
+    for (const [body, , ...xyz] of rows) {
+      // The offline series is approximate; outer planet errors are larger in AU.
+      const toleranceAU = Math.hypot(...xyz) < 2 ? .00004 : .0025;
+      const actual = positions[solarBodies.indexOf(body)];
+      close(Math.hypot(...actual.map((v, i) => v - xyz[i])), 0, toleranceAU, `${body} at ${date}`);
+    }
+  }
+});
+
+test('a single isotropic scale frames Pluto wide and separates the inner planets on desktop and phone', () => {
+  const dimensions = [[1220, 760], [320, 400]];
+  for (const [date] of solarReference) {
+    const positions = solarSystemAt(Date.parse(date));
+    for (const [width, height] of dimensions) {
+      for (const [radius, bodies] of [[FULL_SYSTEM, positions], [INNER_SYSTEM, positions.slice(0, 5)]]) {
+        const { halfWidth, halfHeight, auPerPixel } = solarFrustum(width, height, radius);
+        const separations = bodies.slice(1).map(([x, y]) => {
+          assert.ok(Math.abs(x) < halfWidth && Math.abs(y) < halfHeight);
+          return Math.hypot(x * width / (2 * halfWidth), y * height / (2 * halfHeight));
+        });
+        separations.forEach((pixels, i) => close(pixels * auPerPixel, Math.hypot(...bodies[i + 1].slice(0, 2)),
+          1e-10, `${solarBodies[i + 1]} projected Sun separation`));
+        if (radius === INNER_SYSTEM) assert.ok(Math.min(...separations) > 30);
+      }
+    }
+  }
+});
 
 test('city selection changes civil time and sky without changing the instant', () => {
   const reykjavik = city('Reykjavik'), tokyo = city('Tokyo');
