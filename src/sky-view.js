@@ -8,6 +8,24 @@ const direction = ({ azimuth, altitude }) => {
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const mix = (a, b, t) => `rgb(${a.map((x, i) => Math.round(x + (b[i] - x) * t)).join(' ')})`;
 
+function surfaceLight({ sun, airless }, sunVector, right, az) {
+  const [east, up, north] = sunVector;
+  const across = dot(sunVector, right);
+  const ahead = east * Math.sin(az) + north * Math.cos(az);
+  // The center of the modeled disk gates direct light; the sky can still
+  // show twilight (or a sliver of the disk) before the center rises.
+  const direct = sun.altitude <= 0 ? 0 : airless ? 1 : clamp(sun.altitude / 6, 0, 1);
+  const warmth = airless ? 0 : clamp(1 - sun.altitude / 28, 0, 1);
+  const twilight = airless ? 0 : clamp((sun.altitude + 13) / 19, 0, 1);
+  const neutral = airless ? [104, 104, 104] : [54, 69, 67];
+  const warm = [115, 64, 27];
+  const incident = neutral.map((x, i) => x + (warm[i] - x) * warmth);
+  // Keep foreground illumination independent of the star-visibility dimmer.
+  const color = (base, incidence, reflectance = 1) => `rgb(${base.map((x, i) =>
+    Math.round(x + 14 * twilight + incident[i] * direct * Math.max(0, incidence) * reflectance)).join(' ')})`;
+  return { across, ahead, up, color };
+}
+
 // Clip a projected chord to the square around the optical field before sampling.
 // The lens pushes outward, so none of the excluded geometry can re-enter.
 function fieldSpan(a, b, x, y, radius) {
@@ -272,33 +290,64 @@ export function skyView(canvas) {
     }
     ctx.restore();
 
-    ctx.fillStyle = sky.airless ? '#3a373f' : '#111d22';
-    if (groundClip) ctx.fill(groundClip);
-    else ctx.fillRect(0, horizon, width, height - horizon);
-    if (sky.airless && horizon < height) {
-      const depth = height - horizon;
-      // Map the regolith with the same geometry as the horizon.
-      for (const [x, y, size] of [[.18, .25, .07], [.59, .58, .11], [.85, .83, .14], [.35, .9, .09]]) {
-        const location = ((x - camera.az / 180) % 1 + 1) % 1;
-        if (eyepiece) {
-          lensEllipse(location * width, horizon + y * depth, size * width, .065 * depth, '#514b54');
-          lensEllipse(location * width, horizon + (y - .016) * depth, size * width * .87, .047 * depth, '#2c2a32');
-          continue;
+    let horizonColor;
+    if (horizon < height) {
+      const { across, ahead, up, color } = surfaceLight(sky, sunVector, right, az);
+      const base = sky.airless ? [18, 17, 21] : [12, 21, 24];
+      // Three representative normals across the existing foreground: two
+      // side slopes and a center tilted toward the horizon. The span scales with the field of
+      // view so zooming in doesn't stretch the full lighting ramp back out.
+      const centerLight = .94 * up + .34 * ahead;
+      const sideLight = .8 * up + .25 * ahead;
+      const span = .65 * f;
+      const ground = ctx.createLinearGradient(cx - span, 0, cx + span, 0);
+      ground.addColorStop(0, color(base, sideLight - .54 * across));
+      ground.addColorStop(.5, color(base, centerLight));
+      ground.addColorStop(1, color(base, sideLight + .54 * across));
+      ctx.fillStyle = ground;
+      if (groundClip) ctx.fill(groundClip);
+      else ctx.fillRect(0, horizon, width, height - horizon);
+      horizonColor = color(sky.airless ? [49, 48, 53] : [45, 64, 68], centerLight, .75);
+
+      if (sky.airless) {
+        const depth = height - horizon;
+        // The existing crater lips face the horizontal Sun component, with
+        // a lower reflectance in the bowls. No cast shadows or new terrain.
+        const lip = [27, 26, 30], bowl = color([12, 11, 15], up, .62);
+        const horizontalLight = Math.hypot(across, ahead);
+        const ellipse = (x, y, rx, ry, fill) => {
+          if (eyepiece) lensEllipse(x, y, rx, ry, fill);
+          else {
+            ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, 2 * Math.PI);
+            ctx.fillStyle = fill; ctx.fill();
+          }
+        };
+        for (const [x, y, size] of [[.18, .25, .07], [.59, .58, .11], [.85, .83, .14], [.35, .9, .09]]) {
+          const location = ((x - camera.az / 180) % 1 + 1) % 1;
+          const px = location * width, py = horizon + y * depth;
+          const rx = size * width, ry = .065 * depth;
+          let rim = color(lip, .8 * up);
+          if (sky.sun.altitude > 0 && horizontalLight > .001) {
+            const center = eyepiece ? throughLens(px, py) : { x: px, y: py };
+            // A linear ramp across the projected ellipse; the gradient is a
+            // covector, so a shorter axis needs a steeper color change.
+            const gx = across / rx, gy = -ahead / ry;
+            const scale = horizontalLight / (gx * gx + gy * gy);
+            const dx = gx * scale, dy = gy * scale;
+            rim = ctx.createLinearGradient(center.x - dx, center.y - dy, center.x + dx, center.y + dy);
+            rim.addColorStop(0, color(lip, .8 * up - .6 * horizontalLight));
+            rim.addColorStop(1, color(lip, .8 * up + .6 * horizontalLight));
+          }
+          ellipse(px, py, rx, ry, rim);
+          ellipse(px, py - .016 * depth, .87 * rx, .047 * depth, bowl);
         }
-        ctx.beginPath();
-        ctx.ellipse(location * width, horizon + y * depth, size * width, .065 * depth, 0, 0, 2 * Math.PI);
-        ctx.fillStyle = '#514b54'; ctx.fill();
-        ctx.beginPath();
-        ctx.ellipse(location * width, horizon + (y - .016) * depth, size * width * .87, .047 * depth, 0, 0, 2 * Math.PI);
-        ctx.fillStyle = '#2c2a32'; ctx.fill();
       }
     }
     if (hasHorizon) {
-      const color = sky.airless ? '#8a838c' : '#6b9292';
       if (horizonLine) {
-        ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.stroke(horizonLine);
+        ctx.strokeStyle = horizonColor; ctx.lineWidth = 1; ctx.stroke(horizonLine);
       } else {
-        ctx.fillStyle = color; ctx.fillRect(0, horizon, width, 1);
+        ctx.fillStyle = horizonColor; ctx.fillRect(0, horizon, width, 1);
       }
       ctx.font = '14px system-ui';
       for (const [azimuth, name] of [[0, 'N'], [90, 'E'], [180, 'S'], [270, 'W']]) {
