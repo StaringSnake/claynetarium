@@ -6,8 +6,12 @@ import { solarDisplayPosition } from './solar-display.js';
 // Short-axis framing radii in illustrated scene units, not AU.
 export const FULL_SYSTEM = 31;
 export const INNER_SYSTEM = 5.4;
+const TRANSITION_RADIUS = FULL_SYSTEM * 1.12;
 const FOV = 53;
 const viewDirection = new T.Vector3(.18, .93, .33).normalize();
+export const SOLAR_ORIENTATION = Object.freeze({
+  theta: Math.atan2(viewDirection.x, viewDirection.z), latitude: Math.asin(viewDirection.y),
+});
 const paintedTilt = -.85; // Show the illustrative surface bands and ring opening, not their poles.
 const appearances = [
   { radius: 1.08, colors: ['#f8a145', '#ffe3a0', '#ffbd59'] }, // Sun
@@ -29,16 +33,20 @@ export function solarBodyExtent(index) {
 
 export function solarCamera(width, height, radius, target) {
   const aspect = width / height;
-  const vertical = Math.tan(T.MathUtils.degToRad(FOV / 2));
-  const shortAngle = Math.atan(vertical * Math.min(1, aspect));
-  const distance = radius / Math.sin(shortAngle);
+  const distance = radius * distancePerRadius(aspect);
   const camera = new T.PerspectiveCamera(FOV, aspect, .05, distance + 2 * FULL_SYSTEM);
-  frameCamera(camera, target, distance);
+  frameCamera(camera, target, distance, viewDirection);
   return camera;
 }
 
-function frameCamera(camera, target, distance) {
-  camera.position.copy(target).addScaledVector(viewDirection, distance);
+function distancePerRadius(aspect) {
+  const vertical = Math.tan(T.MathUtils.degToRad(FOV / 2));
+  const shortAngle = Math.atan(vertical * Math.min(1, aspect));
+  return 1 / Math.sin(shortAngle);
+}
+
+function frameCamera(camera, target, distance, direction) {
+  camera.position.copy(target).addScaledVector(direction, distance);
   camera.lookAt(target);
   camera.updateMatrixWorld();
 }
@@ -103,20 +111,58 @@ export function solarView(renderer, surfaces, labels) {
     scene.add(group);
     return { group, label };
   });
+  const camera = new T.PerspectiveCamera(FOV, 1, .05);
+  const target = new T.Vector3();
+  const startOffset = new T.Vector3();
+  const direction = new T.Vector3();
   const projection = new T.Vector3();
-  let camera, lastWidth, lastHeight, lastRadius, distance;
+  const raycaster = new T.Raycaster();
+  const pointer = new T.Vector2();
+  const pickMeshes = worlds.flatMap(({ group }) => group.children);
+  let lastWidth, lastHeight, distanceScale, framedRadius = FULL_SYSTEM, framedFocus = 0, transition;
 
-  function draw(positions, { focus, radius }, width, height) {
+  function beginFocus(real) {
+    startOffset.copy(target).sub(worlds[framedFocus].group.position);
+    transition = { start: real, from: framedFocus, radius: framedRadius };
+  }
+
+  function cancelFocus() { transition = undefined; }
+
+  function draw(positions, { focus, radius, theta, latitude }, width, height, real) {
     if (focus === solarBodies.indexOf('Earth')) surfaces.request(false);
     for (const [index, world] of worlds.entries()) {
       world.group.position.fromArray(solarDisplayPosition(positions[index]));
     }
-    const target = worlds[focus].group.position;
-    if (width !== lastWidth || height !== lastHeight || radius !== lastRadius) {
-      camera = solarCamera(width, height, radius, target);
-      distance = camera.position.distanceTo(target);
-      lastWidth = width; lastHeight = height; lastRadius = radius;
-    } else frameCamera(camera, target, distance);
+    const destination = worlds[focus].group.position;
+    target.copy(destination);
+    framedRadius = radius;
+    framedFocus = focus;
+    if (transition) {
+      const elapsed = real - transition.start;
+      // Retreat around the old anchor, move across at wide framing, then approach the live target.
+      if (elapsed < 240) {
+        framedFocus = transition.from;
+        target.copy(worlds[framedFocus].group.position).add(startOffset);
+        framedRadius = T.MathUtils.lerp(transition.radius, TRANSITION_RADIUS, T.MathUtils.smoothstep(elapsed, 0, 240));
+      } else if (elapsed < 500) {
+        framedFocus = transition.from;
+        target.copy(worlds[framedFocus].group.position).add(startOffset)
+          .lerp(destination, T.MathUtils.smoothstep(elapsed, 240, 500));
+        framedRadius = TRANSITION_RADIUS;
+      } else if (elapsed < 900) {
+        framedRadius = T.MathUtils.lerp(TRANSITION_RADIUS, radius, T.MathUtils.smoothstep(elapsed, 500, 900));
+      } else cancelFocus();
+    }
+    if (width !== lastWidth || height !== lastHeight) {
+      camera.aspect = width / height;
+      distanceScale = distancePerRadius(camera.aspect);
+      camera.far = TRANSITION_RADIUS * distanceScale + 2 * FULL_SYSTEM;
+      camera.updateProjectionMatrix();
+      lastWidth = width; lastHeight = height;
+    }
+    const horizontal = Math.cos(latitude);
+    direction.set(Math.sin(theta) * horizontal, Math.sin(latitude), Math.cos(theta) * horizontal);
+    frameCamera(camera, target, framedRadius * distanceScale, direction);
 
     const focalPixels = camera.projectionMatrix.elements[5] * height / 2;
     for (const [index, world] of worlds.entries()) {
@@ -156,5 +202,18 @@ export function solarView(renderer, surfaces, labels) {
     }
     renderer.render(scene, camera);
   }
-  return { draw };
+
+  function pick(x, y) {
+    if (!lastWidth || x < 0 || x >= 1 || y < 0 || y >= 1) return -1;
+    raycaster.setFromCamera(pointer.set(2 * x - 1, 1 - 2 * y), camera);
+    const forward = -raycaster.ray.direction.dot(direction);
+    raycaster.near = camera.near / forward;
+    raycaster.far = camera.far / forward;
+    // Intersect the last painted meshes, not enlarged label bounds. Nearest visible
+    // surface wins, with exact depth ties retaining the renderer's body order.
+    const [hit] = raycaster.intersectObjects(pickMeshes, false);
+    return hit ? worlds.findIndex(({ group }) => group === hit.object.parent) : -1;
+  }
+
+  return { draw, pick, beginFocus, cancelFocus, get animating() { return Boolean(transition); } };
 }

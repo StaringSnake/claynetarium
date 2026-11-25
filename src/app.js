@@ -2,7 +2,7 @@ import { skyAt, solarEvents, solarBodies, solarSystemAt, spaceAt, EARTH_KM, RAD 
 import { civilClock, dateText, timeText, offsetText, SECOND, DAY, FIRST_DAY, LAST_DAY } from './clock.js';
 import { cities, coordinateSite, demo, findCities } from './places.js';
 import { globeView } from './globe-view.js';
-import { solarView, solarBodyExtent, FULL_SYSTEM, INNER_SYSTEM } from './solar-view.js';
+import { solarView, solarBodyExtent, FULL_SYSTEM, INNER_SYSTEM, SOLAR_ORIENTATION } from './solar-view.js';
 import { skyView } from './sky-view.js';
 import { lunarSites, lunarSkyAt, nextLunarSolarEvents } from './lunar.js';
 import { createPlayback } from './playback.js';
@@ -23,8 +23,9 @@ const telescope = $('telescope'), telescopeToggle = $('telescope-toggle'), teles
 const telescopeControls = $('telescope-controls');
 let telescopeActive = false, telescopeMagnification = 1;
 const pointers = new Map();
-let dragged = false, telescopePinch = null;
-const solar = { focus: 0, radius: FULL_SYSTEM };
+const DRAG_THRESHOLD = 5;
+let dragged = false, telescopePinch = null, solarPinch = false;
+const solar = { focus: 0, radius: FULL_SYSTEM, ...SOLAR_ORIENTATION };
 const solarBody = $('solar-body'), welcome = $('solar-welcome'), explore = $('explore-solar');
 let welcomeDismissed = false;
 let solarPositions, solarInstant, solarSampleTime;
@@ -358,7 +359,7 @@ function viewControls() {
   $('view-badge').hidden = !inSolar && (!site || !inSpace || Boolean(flight || ride));
   const help = ride ? 'Illustrative route, not to scale. The ride adds no simulation time.' :
     pinning ? 'Drag or use arrow keys to orbit. Tap Earth or press Enter to place a pin. Escape cancels.' :
-    inSolar ? 'Scroll, pinch or use the zoom buttons. Use the body picker to center a world.' :
+    inSolar ? 'Drag or use arrow keys to orbit. Pinch, scroll or use the zoom buttons. Click or tap a world, or use the body picker to follow it.' :
       inSpace ? 'Drag or use arrow keys to orbit. Pinch, scroll or use the zoom buttons.' :
       telescopeActive ? 'Drag or use arrow keys to aim. Scroll or pinch to zoom, or use the magnification slider.' :
         showTelescope ? 'Drag or use arrow keys to aim. Open Telescope to magnify the center of the view.' :
@@ -371,6 +372,7 @@ function viewControls() {
   if (!inSpace && !inSolar) $('view-badge').textContent = '';
   view.classList.toggle('solar', inSolar);
   if (inSolar) updateSolarZoomControls();
+  else solarRenderer?.cancelFocus();
   updateWelcome();
   dirty = true;
 }
@@ -383,7 +385,8 @@ function dismissWelcome(moveFocus) {
 
 function solarPresetRadius() {
   const nearerFull = solar.radius > Math.sqrt(FULL_SYSTEM * INNER_SYSTEM);
-  return solar.focus === 0 && nearerFull ? INNER_SYSTEM : FULL_SYSTEM;
+  const defaultAngle = solar.theta === SOLAR_ORIENTATION.theta && solar.latitude === SOLAR_ORIENTATION.latitude;
+  return solar.focus === 0 && nearerFull && defaultAngle ? INNER_SYSTEM : FULL_SYSTEM;
 }
 
 function closestSolarRadius() { return 1.55 * solarBodyExtent(solar.focus); }
@@ -395,21 +398,26 @@ function updateSolarZoomControls() {
   $('view-badge').textContent = 'Not to scale';
 }
 
-function centerSolar(focus, radius) {
-  solar.focus = focus; solar.radius = radius;
+function centerSolar(focus, radius = focus === 0 ? FULL_SYSTEM : 2.65 * solarBodyExtent(focus)) {
+  if (focus && focus !== solar.focus && !motion.matches) solarRenderer.beginFocus(performance.now());
+  else solarRenderer.cancelFocus();
+  if (focus === 0) Object.assign(solar, SOLAR_ORIENTATION);
+  solar.focus = focus;
+  solar.radius = radius;
   solarBody.selectedIndex = focus;
   updateSolarZoomControls();
   dirty = true;
 }
 
-solarBody.replaceChildren(...solarBodies.map(body => new Option(body === 'Pluto' ? 'Pluto (dwarf planet)' : body, body)));
-solarBody.addEventListener('change', () => {
-  const focus = solarBody.selectedIndex;
+function followSolar(focus) {
   if (focus < 0 || mode !== 'solar') return;
   welcomeDismissed = true;
   showPanel(null, false);
-  centerSolar(focus, focus === 0 ? FULL_SYSTEM : 2.65 * solarBodyExtent(focus));
-});
+  if (focus !== solar.focus || focus === 0) centerSolar(focus);
+}
+
+solarBody.replaceChildren(...solarBodies.map(body => new Option(body === 'Pluto' ? 'Pluto (dwarf planet)' : body, body)));
+solarBody.addEventListener('change', () => followSolar(solarBody.selectedIndex));
 explore.addEventListener('click', () => dismissWelcome(true));
 $('solar-zoom-preset').addEventListener('click', () => centerSolar(0, solarPresetRadius()));
 
@@ -517,7 +525,9 @@ function draw(real) {
   if (!width || !height) return;
   if (mode === 'solar') {
     const changed = updateSolar(real);
-    if (dirty || changed) solarRenderer.draw(solarPositions, solar, width, height);
+    const animating = solarRenderer.animating;
+    if (animating && motion.matches) solarRenderer.cancelFocus();
+    if (dirty || changed || animating) solarRenderer.draw(solarPositions, solar, width, height, real);
     dirty = false;
     return;
   }
@@ -720,8 +730,14 @@ $('moon-focus').addEventListener('click', () => {
 });
 
 function rotate(dx, dy) {
-  if (mode === 'solar' || (!site && mode === 'surface')) return;
-  if (mode === 'surface') {
+  if (!site && mode === 'surface') return;
+  if (mode === 'solar') {
+    const preset = solarPresetRadius();
+    solarRenderer.cancelFocus();
+    solar.theta = (solar.theta - dx * .007) % (2 * Math.PI);
+    solar.latitude = clamp(solar.latitude + dy * .007, -1.55, 1.55);
+    if (solarPresetRadius() !== preset) updateSolarZoomControls();
+  } else if (mode === 'surface') {
     const sensitivity = .22 / surface.magnification;
     surface.az = wrap(surface.az - dx * sensitivity);
     surface.alt = clamp(surface.alt + dy * sensitivity, -83, 83);
@@ -790,7 +806,11 @@ telescope.addEventListener('keydown', escapeTelescope);
 function zoom(factor) {
   if (mode === 'solar') {
     const radius = clamp(solar.radius * factor, closestSolarRadius(), FULL_SYSTEM);
-    if (radius !== solar.radius) centerSolar(solar.focus, radius);
+    if (radius === solar.radius && !solarRenderer.animating) return;
+    solarRenderer.cancelFocus();
+    solar.radius = radius;
+    updateSolarZoomControls();
+    dirty = true;
     return;
   }
   orbit.distance = clamp(orbit.distance * factor, orbit.focus === 'earth' ? 1.09 : .49, 150);
@@ -817,7 +837,7 @@ view.addEventListener('keydown', event => {
   escapeTelescope(event);
   if (event.defaultPrevented) return;
   const keys = { ArrowLeft: [28, 0], ArrowRight: [-28, 0], ArrowUp: [0, 28], ArrowDown: [0, -28] };
-  if (mode !== 'solar' && Object.hasOwn(keys, event.key)) { event.preventDefault(); rotate(...keys[event.key]); }
+  if (Object.hasOwn(keys, event.key)) { event.preventDefault(); rotate(...keys[event.key]); }
   if (event.key === 'Escape' && pinning) {
     event.preventDefault();
     if (!site) closeGlobePreview();
@@ -836,10 +856,11 @@ function placePin(x, y) {
 
 view.addEventListener('pointerdown', event => {
   if (flight || ride || event.target !== view || event.button !== 0 || pointers.size >= 2) return;
-  const point = { x: event.clientX, y: event.clientY, type: event.pointerType };
+  const point = { x: event.clientX, y: event.clientY, type: event.pointerType, mode };
   if (!pointers.size) {
     dragged = false;
     telescopePinch = null;
+    solarPinch = false;
   } else {
     const [first] = pointers.values();
     if (telescopeActive) {
@@ -847,6 +868,7 @@ view.addEventListener('pointerdown', event => {
       telescopePinch = { gap: Math.hypot(point.x - first.x, point.y - first.y), magnification: telescopeMagnification };
     }
     dragged = true;
+    solarPinch = mode === 'solar';
   }
   view.setPointerCapture(event.pointerId);
   pointers.set(event.pointerId, point);
@@ -854,13 +876,13 @@ view.addEventListener('pointerdown', event => {
 view.addEventListener('pointermove', event => {
   const before = pointers.get(event.pointerId);
   if (!before || flight || ride) return;
-  const next = { x: event.clientX, y: event.clientY, type: before.type };
+  const next = { ...before, x: event.clientX, y: event.clientY };
   const dx = next.x - before.x, dy = next.y - before.y;
-  if (!dragged && Math.hypot(dx, dy) < 5) return;
+  if (!dragged && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
   dragged = true;
   if (pointers.size === 1) {
     // After a pinch, do not turn the last contact's release movement into aim.
-    if (!telescopePinch) rotate(dx, dy);
+    if (!telescopePinch && !solarPinch) rotate(dx, dy);
   } else if (telescopePinch || mode === 'globe' || mode === 'solar') {
     const other = [...pointers.entries()].find(([id]) => id !== event.pointerId)[1];
     const nextGap = Math.hypot(next.x - other.x, next.y - other.y);
@@ -874,10 +896,17 @@ view.addEventListener('pointermove', event => {
   pointers.set(event.pointerId, next);
 });
 view.addEventListener('pointerup', event => {
-  const tracked = pointers.delete(event.pointerId);
-  if (tracked && !dragged && pinning && globe && !flight && !ride) {
-    const bounds = view.getBoundingClientRect();
-    placePin((event.clientX - bounds.left) / bounds.width, (event.clientY - bounds.top) / bounds.height);
+  const point = pointers.get(event.pointerId);
+  pointers.delete(event.pointerId);
+  if (!point || dragged || flight || ride) return;
+  if (!pinning && mode !== 'solar') return;
+  const bounds = view.getBoundingClientRect();
+  const x = (event.clientX - bounds.left) / bounds.width, y = (event.clientY - bounds.top) / bounds.height;
+  if (pinning && globe) placePin(x, y);
+  else if (mode === 'solar' && point.mode === 'solar' &&
+      Math.hypot(event.clientX - point.x, event.clientY - point.y) < DRAG_THRESHOLD &&
+      document.elementFromPoint(event.clientX, event.clientY) === view) {
+    followSolar(solarRenderer.pick(x, y));
   }
 });
 for (const type of ['pointercancel', 'lostpointercapture']) view.addEventListener(type, event => pointers.delete(event.pointerId));

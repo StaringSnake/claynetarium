@@ -140,16 +140,27 @@ async function chooseCity(page, name) {
 }
 
 const captureSolar = (page, name) => captureLayout(page, name, process.env.SOLAR_SCREENSHOTS);
+const waitForSceneLayout = scene => scene.evaluate(view => new Promise(resolve => {
+  const observer = new ResizeObserver(() => { observer.disconnect(); resolve(); });
+  observer.observe(view);
+}));
+const solarPoints = new Map([['Sun', new Vector3()], ...solarReference[0][1].map(([body, , ...xyz]) =>
+  [body, new Vector3(...solarDisplayPosition(xyz))])]);
+
+async function solarPoint(page, radius, body) {
+  const { x, y, width, height } = await region(page).boundingBox();
+  const camera = solarCamera(width, height, radius, solarPoints.get('Sun'));
+  const point = solarPoints.get(body).clone().project(camera);
+  return [x + width * (1 + point.x) / 2, y + height * (1 - point.y) / 2];
+}
 
 // Check rendered pixels at the projections of independently sampled heliocentric coordinates.
 async function solarPixels(page, radius, names, focus = 'Sun') {
   const view = region(page);
   const { width, height } = await view.boundingBox();
-  const points = new Map([['Sun', new Vector3()], ...solarReference[0][1].map(([body, , ...xyz]) =>
-    [body, new Vector3(...solarDisplayPosition(xyz))])]);
-  const camera = solarCamera(width, height, radius, points.get(focus));
+  const camera = solarCamera(width, height, radius, solarPoints.get(focus));
   const checks = names.map(body => {
-    const { x, y } = points.get(body).clone().project(camera);
+    const { x, y } = solarPoints.get(body).clone().project(camera);
     return [body, Math.round(width * (1 + x) / 2), Math.round(height * (1 - y) / 2)];
   });
   const image = await view.screenshot({ scale: 'css' });
@@ -160,7 +171,9 @@ async function solarPixels(page, radius, names, focus = 'Sun') {
     ctx.drawImage(image, 0, 0);
     const pixel = (x, y) => ctx.getImageData(x, y, 1, 1).data;
     const brightness = ([r, g, b]) => r + g + b;
-    const background = brightness(pixel(0, 0));
+    // A nearby world can extend into a corner when the camera follows a planet.
+    const background = Math.min(...[[0, 0], [image.width - 1, 0],
+      [0, image.height - 1], [image.width - 1, image.height - 1]].map(([x, y]) => brightness(pixel(x, y))));
     return checks.map(([body, x, y]) => {
       const center = brightness(pixel(x, y));
       // Read across the sphere's interior, not its antialiased silhouette.
@@ -212,10 +225,7 @@ test('fresh live Solar System opens and reloads without cheese; keyboard dismiss
   await earthEntry(page, 'Try demo sky');
   // Revealing Telescope changes the stage height. Let native layout deliver
   // the resize, then step the controlled frames through buffer clear and paint.
-  await region(page).evaluate(view => new Promise(resolve => {
-    const observer = new ResizeObserver(() => { observer.disconnect(); resolve(); });
-    observer.observe(view);
-  }));
+  await waitForSceneLayout(region(page));
   await page.evaluate(() => window.stepFrames(2, 0));
   await inEarthSky(page);
   assert.ok(await region(page).evaluate(el => el === document.activeElement));
@@ -281,8 +291,8 @@ test('solar render work is bounded and paused clock edits repaint without waitin
 
 for (const phone of [false, true]) test(`3D Solar System framing, shading and zoom on ${phone ? 'phone' : 'desktop'}`, async t => {
   const { page, errors } = await opened(t, phone ?
-    { ...devices['iPhone 13'], viewport: { width: 390, height: 664 } } :
-    { viewport: { width: 1220, height: 900 } }, phone ? watchOrbitBake : undefined);
+    { ...devices['iPhone 13'], viewport: { width: 390, height: 664 }, reducedMotion: 'reduce' } :
+    { viewport: { width: 1220, height: 900 }, reducedMotion: 'reduce' }, phone ? watchOrbitBake : undefined);
   const act = phone ? 'tap' : 'click';
   await inSolar(page);
   await captureSolar(page, `${phone ? 'phone' : 'desktop'}-welcome`);
@@ -322,6 +332,151 @@ for (const phone of [false, true]) test(`3D Solar System framing, shading and zo
   await captureSolar(page, `${phone ? 'phone' : 'desktop'}-${body.toLowerCase()}-centered`);
   await button(page, 'Full system')[act]();
   await solarPixels(page, FULL_SYSTEM, ['Sun', 'Pluto']);
+  assert.deepEqual(errors, []);
+});
+
+test('normal Solar focus retreats, approaches the latest selection, tracks playback, and restores the overview', async t => {
+  const { page, errors } = await opened(t, {
+    viewport: { width: 1220, height: 900 }, reducedMotion: 'no-preference',
+  }, controlledFrames, false);
+  const step = (delta, count = 1) => page.evaluate(([count, delta]) => window.stepFrames(count, delta), [count, delta]);
+  const diameter = async body => (await solarPixels(page, FULL_SYSTEM, [body], body))[body].diameter;
+  const picker = solarPicker(page);
+  const scene = region(page);
+  await openPanel(page, 'Time');
+  await button(page, 'Pause').click();
+  await button(page, 'Close Time').click();
+  await button(page, 'Explore').click();
+  await step(1);
+  const sunCenter = await solarPoint(page, FULL_SYSTEM, 'Sun');
+  // At the fixed instant this view angle puts Mercury directly in front of the Sun.
+  await drag(page, ...sunCenter, 271, -159);
+  await step(1);
+  assert.equal(await picker.inputValue(), 'Sun', 'overview drag alone does not pick');
+  await page.mouse.click(...sunCenter);
+  assert.equal(await picker.inputValue(), 'Mercury', 'the front body wins where visible meshes overlap');
+  await picker.selectOption('Sun');
+  await button(page, 'Inner planets').click();
+  await step(1);
+  const wide = await diameter('Sun');
+  const hit = await solarPoint(page, INNER_SYSTEM, 'Mars');
+  await page.mouse.click(5, hit[1]);
+  assert.equal(await picker.inputValue(), 'Sun', 'empty background is not a hit');
+  await page.mouse.click(...hit);
+  assert.equal(await picker.inputValue(), 'Mars', 'the visible globe uses the same picker state');
+  await step(240);
+  const retreat = await diameter('Sun');
+  assert.ok(retreat < wide * .4, `Sun shrinks during retreat: ${wide} → ${retreat}`);
+
+  await picker.selectOption('Jupiter');
+  await page.setViewportSize({ width: 980, height: 760 });
+  await waitForSceneLayout(scene);
+  await step(760, 2);
+  const followed = await diameter('Jupiter');
+  assert.ok(followed > 100, `latest selection reaches close-up after resize: ${followed}px`);
+  const beforeDrag = await scene.screenshot();
+  const { x, y, width, height } = await scene.boundingBox();
+  await drag(page, x + width / 2, y + height / 2, 150, -70);
+  await step(16);
+  assert.notDeepEqual(await scene.screenshot(), beforeDrag, 'drag changes the view angle');
+  assert.equal(await picker.inputValue(), 'Jupiter', 'a drag starting on the globe does not pick');
+  assert.ok(Math.abs(await diameter('Jupiter') - followed) < 6, 'rotating keeps the surface centered at the same zoom');
+  const beforeKey = await scene.screenshot();
+  await scene.press('ArrowRight');
+  await step(16);
+  assert.notDeepEqual(await scene.screenshot(), beforeKey, 'the focused viewport can rotate with the keyboard');
+  await wheelScene(page, -100);
+  await step(16);
+  const zoomed = await diameter('Jupiter');
+  assert.ok(zoomed > followed * 1.1, 'wheel zoom stays centered on the followed body');
+  assert.equal(await clock(page), fixed);
+
+  await openPanel(page, 'Time');
+  await page.getByLabel('Playback speed').selectOption('3600');
+  await button(page, 'Play').click();
+  await button(page, 'Close Time').click();
+  const playbackBefore = Date.parse(await clock(page));
+  await step(1000, 120);
+  assert.equal(Date.parse(await clock(page)) - playbackBefore, 5 * 24 * 3600 * 1000);
+  assert.ok(Math.abs(await diameter('Jupiter') - zoomed) < 6, 'Jupiter stays centered as its position advances five days');
+  if (process.env.SOLAR_SCREENSHOTS) {
+    await scene.screenshot({ path: `${process.env.SOLAR_SCREENSHOTS}/desktop-following-jupiter.png`, scale: 'css' });
+  }
+  await picker.selectOption('Sun');
+  await step(0);
+  assert.ok(await diameter('Sun') < retreat * 1.5, 'Sun restores wide overview rather than a Sun close-up');
+  await earthEntry(page, 'Try demo sky');
+  await waitForSceneLayout(scene);
+  await step(0, 2);
+  await inEarthSky(page);
+  assert.equal(Date.parse(await clock(page)) - playbackBefore, 5 * 24 * 3600 * 1000);
+  assert.equal(await page.getByLabel('Playback speed').inputValue(), '3600');
+  t.diagnostic(`Sun retreat ${wide}→${retreat}px; Jupiter centered ${followed}→${zoomed}px while advancing five days`);
+  assert.deepEqual(errors, []);
+});
+
+test('phone Solar drag and pinch do not pick, and a body tap follows directly with reduced motion', async t => {
+  const { page, errors } = await opened(t, {
+    ...devices['iPhone 13'], viewport: { width: 390, height: 664 }, reducedMotion: 'reduce',
+  }, controlledFrames, false);
+  const step = () => page.evaluate(() => window.stepFrames(1, 16));
+  const picker = solarPicker(page);
+  const scene = region(page);
+  const session = await page.context().newCDPSession(page);
+  await button(page, 'Explore').tap();
+  await button(page, 'Inner planets').tap();
+  await step();
+  // Clip above the overlays so transient touch feedback stays out of the
+  // comparison without injecting CSS or changing the visible controls.
+  const bounds = await scene.boundingBox();
+  const zoom = await scene.getByRole('group', { name: 'Scene zoom' }).boundingBox();
+  const badge = await scene.getByText('Not to scale', { exact: true }).boundingBox();
+  const x0 = Math.ceil(bounds.x), y0 = Math.ceil(bounds.y);
+  const clip = { x: x0, y: y0, width: Math.floor(bounds.x + bounds.width) - x0,
+    height: Math.floor(Math.min(zoom.y, badge.y)) - y0 };
+  const solarFrame = () => page.screenshot({ clip });
+  const hit = await solarPoint(page, INNER_SYSTEM, 'Venus');
+  const [x, y] = hit;
+  const original = await solarFrame();
+  const sun = await solarPoint(page, INNER_SYSTEM, 'Sun');
+  await touchGesture(session, [[sun], [[sun[0] - 55, sun[1] - 30]], [sun]]);
+  await step();
+  assert.equal(await picker.inputValue(), 'Sun');
+  assert.deepEqual(await solarFrame(), original, 'round trip restores the angle without selecting the Sun');
+  await touchGesture(session, [[hit], [[x + 40, y + 35]], [[x + 85, y + 55]]]);
+  await step();
+  assert.equal(await picker.inputValue(), 'Sun');
+  assert.notDeepEqual(await solarFrame(), original, 'touch drag visibly rotates the overview');
+  await button(page, 'Full system').tap();
+  await button(page, 'Inner planets').tap();
+  await step();
+  await touchGesture(session, [[hit, [x - 42, y]], [[x + 20, y], [x - 62, y]]]);
+  await step();
+  assert.equal(await picker.inputValue(), 'Sun');
+  const pinched = (await solarPixels(page, INNER_SYSTEM, ['Sun'])).Sun.diameter;
+  assert.ok(pinched > 85, 'pinch increases the diameter without changing the target');
+  const innerHit = await solarPoint(page, INNER_SYSTEM * 42 / 82, 'Venus');
+  await page.touchscreen.tap(...innerHit);
+  await step();
+  assert.equal(await picker.inputValue(), 'Venus');
+  const closeup = (await solarPixels(page, FULL_SYSTEM, ['Venus'], 'Venus')).Venus.diameter;
+  assert.ok(closeup > 120, 'one frame reaches the centered close-up with reduced motion');
+  if (process.env.SOLAR_SCREENSHOTS) {
+    await scene.screenshot({ path: `${process.env.SOLAR_SCREENSHOTS}/phone-following-venus.png`, scale: 'css' });
+  }
+  const center = await solarPoint(page, FULL_SYSTEM, 'Sun');
+  const [cx, cy] = center;
+  await touchGesture(session, [[center], [[cx + 45, cy - 30]], [[cx + 70, cy - 40]]]);
+  await step();
+  assert.ok(Math.abs((await solarPixels(page, FULL_SYSTEM, ['Venus'], 'Venus')).Venus.diameter - closeup) < 6);
+  await touchGesture(session, [[[cx - 40, cy], [cx + 40, cy]], [[cx - 56, cy], [cx + 56, cy]]]);
+  await step();
+  assert.equal(await picker.inputValue(), 'Venus');
+  assert.ok((await solarPixels(page, FULL_SYSTEM, ['Venus'], 'Venus')).Venus.diameter > closeup * 1.25);
+  await picker.selectOption('Sun');
+  await step();
+  assert.ok((await solarPixels(page, FULL_SYSTEM, ['Sun', 'Pluto'])).Sun.diameter < pinched / 5);
+  t.diagnostic(`Touch drag rotated without picking; pinch kept Sun selected; tap centered Venus at ${closeup}px in one frame`);
   assert.deepEqual(errors, []);
 });
 
@@ -583,7 +738,7 @@ test('the scene keeps its mode-specific accessible description when View closes'
     await button(page, 'Close View').click();
     assert.equal(await description(), closed);
   }
-  await check(/Use the body picker/);
+  await check(/Drag or use arrow keys to orbit.*Click or tap a world, or use the body picker/);
   await openPanel(page, 'Location');
   await button(page, 'Try demo sky').click();
   await check(/Open Telescope/);
