@@ -1,6 +1,6 @@
 # Earth Sky
 
-A static planetarium for exploring the Solar System and looking up from the surfaces of Earth and its Moon. Each visit opens on a live, Sun-centered 3D view. Dismiss the welcome with **Explore**, use **Inner planets** to zoom in, or center a world using the body picker. The view uses modeled heliocentric positions but compresses distances and enlarges bodies for visibility. It is **not to scale**.
+A static planetarium for exploring the Solar System and looking up from the surfaces of Earth and its Moon. Each visit opens on a live, Sun-centered 3D view. Dismiss the welcome with **Explore**, use **Inner planets** to zoom in, or click, tap, or use the body picker to follow a world. Drag or use arrow keys to orbit; scroll, pinch, or use the zoom buttons to change distance without losing the target. Select the Sun to restore the overview. The view compresses modeled heliocentric distances and enlarges bodies for visibility. It is **not to scale**.
 
 To see the sky from Earth, open **Location** and choose **Use my location**, **Pick a place** (search built-in cities, enter coordinates, or place a globe pin), or **Try demo sky** (Reykjavík, no location request). If WebGL or location permission is unavailable, you can still pick a city, enter coordinates, or try the demo.
 
