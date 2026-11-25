@@ -16,13 +16,14 @@
     <section class="observatory" aria-labelledby="view-name">
       <div class="view-head">
         <div class="view-heading">
-          <h2 id="view-name">Inside the cheese wheel</h2><span id="bearing" class="muted" hidden></span>
+          <h2 id="view-name">Solar System</h2><span id="bearing" class="muted" hidden></span>
         </div>
         <div class="view-actions">
           <button id="skip-ride" class="primary" type="button" hidden>Skip ride</button>
-          <button id="close-globe" type="button" hidden>Back to cheese</button>
+          <button id="close-globe" type="button" hidden>Back to Solar System</button>
           <div class="actions" role="group" aria-label="Scene controls">
-            <button id="location-toggle" class="primary" type="button" aria-controls="location-panel" aria-expanded="true">Location</button>
+            <select id="solar-body" aria-label="Center on a Solar System body" hidden></select>
+            <button id="location-toggle" type="button" aria-controls="location-panel" aria-expanded="false">Location</button>
             <button id="time-toggle" type="button" aria-controls="clock-panel" aria-expanded="false" hidden>Time</button>
             <button id="travel-toggle" type="button" aria-controls="travel-panel" aria-expanded="false" hidden>Travel</button>
             <button id="view-toggle" type="button" aria-controls="view-panel" aria-expanded="false">View</button>
@@ -30,9 +31,15 @@
         </div>
       </div>
       <div class="stage">
-      <section class="panel" id="location-panel" aria-labelledby="site-title">
+      <section class="panel solar-welcome" id="solar-welcome" aria-labelledby="welcome-title" hidden>
+        <div class="panel-head"><h2 id="welcome-title">Welcome to the Solar System</h2></div>
+        <p>Watch the Sun, eight planets, and Pluto in 3D.</p>
+        <p class="muted">Pick a body to center it, or open Location to see the sky from Earth.</p>
+        <div class="actions"><button id="explore-solar" class="primary" type="button">Explore</button></div>
+      </section>
+      <section class="panel" id="location-panel" aria-labelledby="site-title" hidden>
         <div class="panel-head"><h2 id="site-title">Location</h2><button type="button" class="panel-close" aria-label="Close Location">Close</button></div>
-        <p id="choose-site">No location selected. Choose how to leave the cheese for an Earth sky.</p>
+        <p id="choose-site">Choose a location to see the sky from Earth.</p>
         <p class="readout" id="site" hidden></p>
         <p class="muted" id="coordinates" hidden></p>
         <div class="actions" id="earth-location-actions">
@@ -101,7 +108,7 @@
 
       <section class="panel" id="view-panel" aria-labelledby="view-title" hidden>
         <div class="panel-head"><h2 id="view-title">View</h2><button type="button" class="panel-close" aria-label="Close View">Close</button></div>
-        <p class="muted" id="panel-view-help">Drag, swipe, or use arrow keys to look around inside the wheel.</p>
+        <p class="muted" id="panel-view-help"></p>
         <div class="actions" id="orbit-tools" hidden>
           <button id="overview" type="button" aria-pressed="false">Orbit overview</button>
           <button id="earth-focus" type="button">Frame Earth</button>
@@ -134,13 +141,17 @@
         <footer><p>Location and searches stay in this tab. Use a level horizon when comparing solar events outside.</p><p>Map: <a href="./licenses/world-atlas.txt">Natural Earth / World Atlas</a>. Ephemeris: <a href="./licenses/astronomy-engine.txt">Astronomy Engine</a>.</p></footer>
       </section>
 
-      <p class="sr-only" id="view-help">Drag, swipe, or use arrow keys to look around inside the wheel.</p>
+      <p class="sr-only" id="view-help"></p>
       <div id="viewport" class="viewport" tabindex="0" role="region" aria-label="Planetarium view" aria-describedby="view-help">
         <canvas id="space" aria-hidden="true" hidden></canvas><canvas id="sky" aria-hidden="true" hidden></canvas>
-        <canvas id="cheese" aria-hidden="true"></canvas>
-        <p id="loading" role="status">Opening the cheese wheel…</p>
+        <div id="solar-labels" aria-hidden="true" hidden></div>
+        <p id="loading" role="status">Opening the Solar System…</p>
         <div class="view-badge" id="view-badge" hidden></div>
-        <div class="zoom" id="zoom" hidden><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button></div>
+        <div class="zoom" id="zoom" role="group" aria-label="Scene zoom" hidden>
+          <button id="solar-zoom-preset" type="button" hidden>Inner planets</button>
+          <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+          <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+        </div>
         <div id="arrival-flag" class="arrival-flag" role="img" aria-label="Cheese flag planted on the ground" hidden>
           <svg viewBox="0 0 96 80" aria-hidden="true">
             <path d="M6 72L14 65L28 64L39 60L56 63L65 68L82 74L70 77L19 77Z" fill="#747079"/>

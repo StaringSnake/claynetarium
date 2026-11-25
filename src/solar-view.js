@@ -1,0 +1,160 @@
+import * as T from 'three';
+import { solarBodies } from './astronomy.js';
+import { seededRandom } from './rocket-models.js';
+import { solarDisplayPosition } from './solar-display.js';
+
+// Short-axis framing radii in illustrated scene units, not AU.
+export const FULL_SYSTEM = 31;
+export const INNER_SYSTEM = 5.4;
+const FOV = 53;
+const viewDirection = new T.Vector3(.18, .93, .33).normalize();
+const paintedTilt = -.85; // Show the illustrative surface bands and ring opening, not their poles.
+const appearances = [
+  { radius: 1.08, colors: ['#f8a145', '#ffe3a0', '#ffbd59'] }, // Sun
+  { radius: .34, colors: ['#817775', '#b3a6a2'] }, // Mercury
+  { radius: .48, colors: ['#ba8d61', '#f7d5a2', '#e2ad78', '#f5dfb6'], bands: true }, // Venus
+  { radius: .52 }, // Earth uses the shared clay globe material
+  { radius: .36, colors: ['#b15f49', '#ef9b71', '#d27c55'] }, // Mars
+  { radius: 1.08, colors: ['#c18a71', '#e3bd9b', '#f3dbbb', '#d49a7a', '#a56e5d', '#f1c7a2'], bands: true }, // Jupiter
+  { radius: .91, colors: ['#d2ae7f', '#f3dcaa', '#fae8bb', '#e2c593'], bands: true, ring: 1.9 }, // Saturn
+  { radius: .66, colors: ['#86c6c4', '#b7e4dc', '#9bd5cf'], bands: true }, // Uranus
+  { radius: .64, colors: ['#547bbb', '#89ace3', '#6b92d4'], bands: true }, // Neptune
+  { radius: .30, colors: ['#947f85', '#d8c6c2', '#aa8b7c'] }, // Pluto
+];
+
+export function solarBodyExtent(index) {
+  const { radius, ring = 1 } = appearances[index];
+  return radius * ring;
+}
+
+export function solarCamera(width, height, radius, target) {
+  const aspect = width / height;
+  const vertical = Math.tan(T.MathUtils.degToRad(FOV / 2));
+  const shortAngle = Math.atan(vertical * Math.min(1, aspect));
+  const distance = radius / Math.sin(shortAngle);
+  const camera = new T.PerspectiveCamera(FOV, aspect, .05, distance + 2 * FULL_SYSTEM);
+  frameCamera(camera, target, distance);
+  return camera;
+}
+
+function frameCamera(camera, target, distance) {
+  camera.position.copy(target).addScaledVector(viewDirection, distance);
+  camera.lookAt(target);
+  camera.updateMatrixWorld();
+}
+
+function paintedSurface({ colors, bands }, index) {
+  const width = 128, height = 64;
+  const pixels = new Uint8Array(width * height * 4);
+  const palette = colors.map(color => new T.Color(color).convertLinearToSRGB());
+  const random = seededRandom(353 + index);
+  const tint = new T.Color();
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const u = 2 * Math.PI * x / width, v = 2 * Math.PI * y / height;
+    const wave = bands ? .5 + .38 * Math.sin(3 * v + .24 * Math.sin(u)) + .10 * Math.sin(9 * v + .4 * Math.cos(3 * u)) :
+      .5 + .24 * Math.sin(5 * u + 3 * v) * Math.cos(2 * u - 6 * v) + .15 * Math.sin(8 * u + 2 * v);
+    const at = T.MathUtils.clamp(wave + .13 * (random() - .5), 0, 1) * (palette.length - 1);
+    const low = Math.floor(at);
+    tint.copy(palette[low]).lerp(palette[Math.min(low + 1, palette.length - 1)], at - low);
+    const i = 4 * (x + y * width);
+    pixels[i] = 255 * tint.r;
+    pixels[i + 1] = 255 * tint.g;
+    pixels[i + 2] = 255 * tint.b;
+    pixels[i + 3] = 255;
+  }
+  const map = new T.DataTexture(pixels, width, height, T.RGBAFormat);
+  map.colorSpace = T.SRGBColorSpace;
+  map.magFilter = T.LinearFilter;
+  map.minFilter = T.LinearMipmapLinearFilter;
+  map.generateMipmaps = true;
+  map.needsUpdate = true;
+  return map;
+}
+
+export function solarView(renderer, surfaces, labels) {
+  const scene = new T.Scene();
+  scene.background = new T.Color('#070d17');
+  const sunlight = new T.PointLight(0xfff1da, 2.6, 0, 0);
+  const fill = new T.DirectionalLight(0xe2efff, .82);
+  fill.position.copy(viewDirection);
+  scene.add(sunlight, fill, new T.AmbientLight(0xbbcde8, .32));
+  const sphere = new T.SphereGeometry(1, 32, 20);
+  const worlds = solarBodies.map((body, index) => {
+    const appearance = appearances[index];
+    const material = body === 'Earth' ? surfaces.earth :
+      new T.MeshLambertMaterial({ map: paintedSurface(appearance, index),
+        emissive: index === 0 ? '#d07822' : 0 });
+    const group = new T.Group();
+    const globe = new T.Mesh(sphere, material);
+    globe.rotation.x = paintedTilt;
+    group.add(globe);
+    if (appearance.ring) {
+      for (const [inner, outer, color] of [[1.24, 1.62, '#c7a279'], [1.68, appearance.ring, '#f0dabb']]) {
+        const ring = new T.Mesh(new T.RingGeometry(inner, outer, 64),
+          new T.MeshLambertMaterial({ color, side: T.DoubleSide }));
+        ring.rotation.x = paintedTilt - Math.PI / 2;
+        group.add(ring);
+      }
+    }
+    group.scale.setScalar(appearance.radius);
+    const label = document.createElement('span');
+    label.textContent = body;
+    labels.append(label);
+    scene.add(group);
+    return { group, label };
+  });
+  const projection = new T.Vector3();
+  let camera, lastWidth, lastHeight, lastRadius, distance;
+
+  function draw(positions, { focus, radius }, width, height) {
+    if (focus === solarBodies.indexOf('Earth')) surfaces.request(false);
+    for (const [index, world] of worlds.entries()) {
+      world.group.position.fromArray(solarDisplayPosition(positions[index]));
+    }
+    const target = worlds[focus].group.position;
+    if (width !== lastWidth || height !== lastHeight || radius !== lastRadius) {
+      camera = solarCamera(width, height, radius, target);
+      distance = camera.position.distanceTo(target);
+      lastWidth = width; lastHeight = height; lastRadius = radius;
+    } else frameCamera(camera, target, distance);
+
+    const focalPixels = camera.projectionMatrix.elements[5] * height / 2;
+    for (const [index, world] of worlds.entries()) {
+      world.textWidth ??= world.label.offsetWidth;
+      const depth = -projection.copy(world.group.position).applyMatrix4(camera.matrixWorldInverse).z;
+      projection.copy(world.group.position).project(camera);
+      world.x = (projection.x + 1) * width / 2;
+      world.y = (1 - projection.y) * height / 2;
+      const extent = solarBodyExtent(index);
+      world.inView = depth > extent && Math.abs(projection.x) <= 1 && Math.abs(projection.y) <= 1;
+      world.size = world.inView ? extent * (focalPixels + Math.hypot(world.x - width / 2, world.y - height / 2)) /
+        (depth - extent) : 0;
+    }
+
+    // Keep labels attached to their body; the native picker covers conjunctions and offscreen worlds.
+    const used = [];
+    const order = [focus, ...solarBodies.keys()].filter((index, i) => i === 0 || index !== focus);
+    for (const index of order) {
+      const { x, y, size, textWidth, label, inView } = worlds[index];
+      const slot = inView ? [
+        [x + size + 5, y - 9], [x - size - 5 - textWidth, y - 9],
+        [x - textWidth / 2, y - size - 23], [x - textWidth / 2, y + size + 5],
+      ].find(([left, top]) => {
+        const right = left + textWidth, bottom = top + 18;
+        return left >= 4 && right <= width - 4 && top >= 4 && bottom <= height - 4 &&
+          !used.some(box => left < box.right + 4 && right > box.left - 4 && Math.abs(top - box.top) < 22) &&
+          !worlds.some(other => other.label !== label && other.inView &&
+            other.x + other.size > left && other.x - other.size < right &&
+            other.y + other.size > top && other.y - other.size < bottom);
+      }) : undefined;
+      label.style.visibility = slot ? 'visible' : 'hidden';
+      if (slot) {
+        const [left, top] = slot;
+        label.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+        used.push({ left, right: left + textWidth, top });
+      }
+    }
+    renderer.render(scene, camera);
+  }
+  return { draw };
+}

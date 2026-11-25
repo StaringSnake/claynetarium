@@ -1,12 +1,14 @@
 # Earth Sky
 
-A static planetarium for looking up from Earth and exploring the Earth–Moon system. Each visit starts inside a fictional wheel of cheese. Drag, swipe, or focus the view and use the arrow keys to look around. To see the real sky, choose **Use my location**, **Pick a place** (search built-in cities, enter coordinates, or place a globe pin), or **Try demo sky** (Reykjavík, no location request). If location is denied or unavailable, you can still pick a place or try the demo.
+A static planetarium for exploring the Solar System and looking up from the surfaces of Earth and its Moon. Each visit opens on a live, Sun-centered 3D view. Dismiss the welcome with **Explore**, use **Inner planets** to zoom in, or center a world using the body picker. The view uses modeled heliocentric positions but compresses distances and enlarges bodies for visibility. It is **not to scale**.
+
+To see the sky from Earth, open **Location** and choose **Use my location**, **Pick a place** (search built-in cities, enter coordinates, or place a globe pin), or **Try demo sky** (Reykjavík, no location request). If WebGL or location permission is unavailable, you can still pick a city, enter coordinates, or try the demo.
 
 ## Scene and controls
 
-The scene fills the available app viewport without entering browser fullscreen. **Location** opens on the first visit. Once you choose a site, use **Location** to change it, **Time** to set the clock or control playback, **Travel** to lift off, land on the Moon, or return, and **View** for gesture help, sky settings, and orbit framing. Panels open one at a time on the right on desktop or in a scrollable sheet on phones. Select the same toggle again, choose **Close**, or press Escape to tuck away a panel without resetting the scene. Closing returns keyboard focus to the corresponding toggle.
+The scene fills the available app viewport without entering browser fullscreen. Use **Time** to set the clock or control playback, and open **Location** to choose or change a site. Once on Earth, use **Travel** to lift off, land on the Moon, or return, and **View** for gesture help, sky settings, and orbit framing. Panels open one at a time on the right on desktop or in a scrollable sheet on phones. Select the same toggle again, choose **Close**, or press Escape to tuck away a panel without resetting the scene. Closing returns keyboard focus to the corresponding toggle.
 
-The first site opens the sky at the current instant. Later site changes keep the simulation instant, and a reload returns to the cheese. Location and searches are neither sent by the app nor stored between visits. If you explicitly request location, the browser or OS may use its own location service.
+The simulation clock starts live and is shared by the map and the sky. Choosing a site changes the civil time zone without resetting the simulation; a reload starts a fresh live visit. Location and searches are neither sent by the app nor stored between visits. If you explicitly request location, the browser or OS may use its own location service.
 
 ## Run locally
 
@@ -18,7 +20,7 @@ npm run build
 python3 -m http.server 8000 --bind 127.0.0.1 --directory dist
 ```
 
-Open <http://127.0.0.1:8000/>. Do not open the source HTML directly. `dist/` is the complete static output; its relative URLs also work under a project path such as `/planetarium/`. Browser location requires a secure context (HTTPS or loopback). The cheese interior and surface sky use Canvas 2D and do not require WebGL 2. Globe features, including globe pins, require WebGL 2.
+Open <http://127.0.0.1:8000/>. Do not open the source HTML directly. `dist/` is the complete static output; its relative URLs also work under a project path such as `/planetarium/`. Browser location requires a secure context (HTTPS or loopback). The surface sky uses Canvas 2D and does not require WebGL 2. The 3D Solar System and globe features, including globe pins, require WebGL 2.
 
 Use the date dial or a date field for large jumps, and the time-of-day dial or time field for finer changes. Edits pause playback. Drag the sky or use arrow keys to look around; in globe mode, drag to orbit and pinch, scroll, or use the zoom buttons. In pin mode, click/tap Earth or use the viewport's arrow keys and Enter to pin the center. The orbit overview compresses the separation and enlarges the Moon; the default globe mode does neither. The surface marker and its label are annotations, not physical objects.
 

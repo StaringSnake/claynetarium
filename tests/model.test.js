@@ -1,16 +1,71 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { Frustum, Matrix4, Vector3 } from 'three';
 import { DAY, FIRST_DAY, LAST_DAY, civilClock, dateText, offsetText } from '../src/clock.js';
-import { skyAt, solarEvents, spaceAt, EARTH_KM, MOON_KM } from '../src/astronomy.js';
+import { skyAt, solarEvents, solarBodies, solarSystemAt, spaceAt, EARTH_KM, MOON_KM } from '../src/astronomy.js';
+import { solarDisplayPosition } from '../src/solar-display.js';
+import { solarBodyExtent, solarCamera, FULL_SYSTEM, INNER_SYSTEM } from '../src/solar-view.js';
 import { cities, coordinateSite, findCities } from '../src/places.js';
 import { lunarSites, lunarSkyAt, solarLimbAltitude, nextLunarSolarEvents } from '../src/lunar.js';
 import { earthRows, apolloSun, solarBrackets } from './fixtures/lunar-horizons.js';
+import { solarReference } from './fixtures/solar-horizons.js';
 
 const day = value => Date.parse(value) / DAY;
 const city = name => cities.find(place => place.name === name);
 const iso = instant => new Date(instant).toISOString();
 const close = (actual, expected, tolerance, name) =>
   assert.ok(Math.abs(actual - expected) <= tolerance, `${name}: ${actual} not within ${tolerance} of ${expected}`);
+
+test('heliocentric ecliptic vectors agree with independent Horizons samples, including Pluto depth', () => {
+  for (const [date, rows] of solarReference) {
+    const positions = solarSystemAt(Date.parse(date));
+    assert.deepEqual(positions[0], [0, 0, 0]);
+    for (const [body, , ...xyz] of rows) {
+      // The offline series is approximate; outer planet errors are larger in AU.
+      const toleranceAU = Math.hypot(...xyz) < 2 ? .00004 : .0025;
+      const actual = positions[solarBodies.indexOf(body)];
+      close(Math.hypot(...actual.map((v, i) => v - xyz[i])), 0, toleranceAU, `${body} at ${date}`);
+    }
+  }
+});
+
+test('display mapping keeps the Sun at the origin and compresses distances without flattening inclination', () => {
+  assert.deepEqual(solarDisplayPosition([0, 0, 0]), [0, 0, 0]);
+  const input = Object.freeze([1, 2, 3]);
+  const short = solarDisplayPosition(input);
+  const long = solarDisplayPosition([16, 32, 48]);
+  const direction = new Vector3(1, 3, -2).normalize();
+  for (const point of [short, long]) {
+    close(new Vector3(...point).normalize().dot(direction), 1, 1e-10, 'display direction');
+  }
+  const ratio = Math.hypot(...long) / Math.hypot(...short);
+  assert.ok(ratio > 1 && ratio < 16);
+});
+
+test('perspective frustum fits full bodies through Pluto and zooms into the inner worlds on desktop and phone', () => {
+  const dimensions = [[1220, 760], [320, 600], [844, 300]];
+  const dates = solarReference.map(([date]) => date);
+  for (let year = 1900; year <= 2100; year += 5) dates.push(`${year}-01-01`);
+  for (const date of dates) {
+    const points = solarSystemAt(Date.parse(date)).map(position => new Vector3(...solarDisplayPosition(position)));
+    for (const [width, height] of dimensions) {
+      for (const [radius, bodies] of [[FULL_SYSTEM, points], [INNER_SYSTEM, points.slice(0, 5)]]) {
+        const camera = solarCamera(width, height, radius, points[0]);
+        const clip = new Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        const frustum = new Frustum().setFromProjectionMatrix(clip);
+        for (const [i, point] of bodies.entries()) {
+          assert.ok(frustum.planes.every(plane =>
+            plane.distanceToPoint(point) > solarBodyExtent(i)), `${solarBodies[i]} at ${date}, ${width}×${height}`);
+          if (radius === INNER_SYSTEM && i > 0) {
+            const ndc = point.clone().project(camera);
+            assert.ok(Math.hypot(ndc.x * width, ndc.y * height) / 2 > .14 * Math.min(width, height),
+              `${solarBodies[i]} separated from Sun at ${date}, ${width}×${height}`);
+          }
+        }
+      }
+    }
+  }
+});
 
 test('city selection changes civil time and sky without changing the instant', () => {
   const reykjavik = city('Reykjavik'), tokyo = city('Tokyo');

@@ -91,3 +91,16 @@ export function spaceAt(instant) {
   return { spin: A.SiderealTime(time) * 15 * RAD, sun: [sun.x, sun.z, -sun.y],
     moon: [moon.x, moon.z, -moon.y].map(x => x * A.KM_PER_AU / EARTH_KM) };
 }
+
+export const solarBodies = ['Sun', 'Mercury', 'Venus', 'Earth', 'Mars',
+  'Jupiter', 'Saturn', 'Uranus', 'Neptune', 'Pluto'];
+
+// Geometric heliocentric vectors in AU, in the fixed J2000 ecliptic frame.
+const toEcliptic = A.Rotation_EQJ_ECL();
+export function solarSystemAt(instant) {
+  const time = A.MakeTime(new Date(instant));
+  return solarBodies.map(body => {
+    const { x, y, z } = A.RotateVector(toEcliptic, A.HelioVector(body, time));
+    return [x, y, z];
+  });
+}

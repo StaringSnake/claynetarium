@@ -43,11 +43,18 @@ main, .observatory, .stage { display: flex; flex-direction: column; flex: 1; min
     var(--line) calc(100% - 9px) calc(100% - 8px), #070910 calc(100% - 7px));
 }
 canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-#cheese { background: #78421e; }
+#solar-labels { position: absolute; inset: 0; pointer-events: none; }
+#solar-labels span {
+  position: absolute; top: 0; left: 0; width: max-content; visibility: hidden;
+  color: #eef2f4; font-size: 14px; line-height: 18px; text-shadow: 0 1px 3px #070d17, 0 0 3px #070d17;
+}
 #loading, .view-badge, .zoom { position: absolute; inset: auto auto 8px 8px; }
 #loading, .view-badge { color: #e8f9f8; background: #0d171f; padding: 4px 8px; border-radius: var(--radius); }
 .view-badge { max-width: calc(100% - 116px); pointer-events: none; font-size: 14px; overflow-wrap: anywhere; }
 .zoom { display: flex; gap: 4px; left: auto; right: 8px; }
+.viewport.solar { cursor: default; }
+.viewport.solar .view-badge { max-width: calc(100% - 16px); }
+.solar-welcome p + p { margin-top: 8px; }
 .telescope { display: flex; align-items: center; gap: 8px; flex-basis: 100%; min-height: 68px; }
 .telescope-controls { display: grid; grid-template-columns: 1fr auto; flex: 1; min-width: 0; max-width: 320px; column-gap: 8px; }
 .telescope-controls label { margin: 0; }
@@ -111,6 +118,8 @@ a { color: var(--accent); }
   .masthead, .view-head, .view-foot { padding-inline: 8px; }
   .view-heading { flex-basis: 100%; }
   .view-actions button { padding-inline: 8px; }
+  #solar-body { width: 164px; padding-inline: 8px; font-size: 14px; }
   .panel { inset-inline: 8px; width: auto; max-height: min(65%, calc(100% - 72px)); }
   .stage:has(.view-badge:not([hidden])) .panel { max-height: min(65%, calc(100% - 100px)); }
+  .viewport.solar .view-badge { bottom: 60px; }
 }
