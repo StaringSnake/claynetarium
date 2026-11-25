@@ -422,22 +422,25 @@ test('phone Solar drag and pinch do not pick, and a body tap follows directly wi
   const step = () => page.evaluate(() => window.stepFrames(1, 16));
   const picker = solarPicker(page);
   const scene = region(page);
+  // Touch feedback can persist on the relabeled zoom preset. Compare the scene,
+  // not the button state; hide the controls only while taking the comparison.
+  const solarFrame = () => scene.screenshot({ style: '#zoom { visibility: hidden; }' });
   const session = await page.context().newCDPSession(page);
   await button(page, 'Explore').tap();
   await button(page, 'Inner planets').tap();
   await step();
   const hit = await solarPoint(page, INNER_SYSTEM, 'Venus');
   const [x, y] = hit;
-  const original = await scene.screenshot();
+  const original = await solarFrame();
   const sun = await solarPoint(page, INNER_SYSTEM, 'Sun');
   await touchGesture(session, [[sun], [[sun[0] - 55, sun[1] - 30]], [sun]]);
   await step();
   assert.equal(await picker.inputValue(), 'Sun');
-  assert.deepEqual(await scene.screenshot(), original, 'round trip restores the angle without selecting the Sun');
+  assert.deepEqual(await solarFrame(), original, 'round trip restores the angle without selecting the Sun');
   await touchGesture(session, [[hit], [[x + 40, y + 35]], [[x + 85, y + 55]]]);
   await step();
   assert.equal(await picker.inputValue(), 'Sun');
-  assert.notDeepEqual(await scene.screenshot(), original, 'touch drag visibly rotates the overview');
+  assert.notDeepEqual(await solarFrame(), original, 'touch drag visibly rotates the overview');
   await button(page, 'Full system').tap();
   await button(page, 'Inner planets').tap();
   await step();
