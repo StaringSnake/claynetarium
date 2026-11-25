@@ -1,6 +1,6 @@
 # 0008: Project the Solar System at one AU scale
 
-Status: Accepted
+Status: Superseded by [0009](0009-illustrate-solar-system-in-perspective.md)
 
 Date: 2026-11-24
 

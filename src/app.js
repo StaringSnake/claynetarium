@@ -2,7 +2,7 @@ import { skyAt, solarEvents, solarBodies, solarSystemAt, spaceAt, EARTH_KM, RAD 
 import { civilClock, dateText, timeText, offsetText, SECOND, DAY, FIRST_DAY, LAST_DAY } from './clock.js';
 import { cities, coordinateSite, demo, findCities } from './places.js';
 import { globeView } from './globe-view.js';
-import { solarView, FULL_SYSTEM, INNER_SYSTEM, CLOSEST_SYSTEM } from './solar-view.js';
+import { solarView, solarBodyExtent, FULL_SYSTEM, INNER_SYSTEM } from './solar-view.js';
 import { skyView } from './sky-view.js';
 import { lunarSites, lunarSkyAt, nextLunarSolarEvents } from './lunar.js';
 import { createPlayback } from './playback.js';
@@ -386,12 +386,13 @@ function solarPresetRadius() {
   return solar.focus === 0 && nearerFull ? INNER_SYSTEM : FULL_SYSTEM;
 }
 
+function closestSolarRadius() { return 1.55 * solarBodyExtent(solar.focus); }
+
 function updateSolarZoomControls() {
   $('solar-zoom-preset').textContent = solarPresetRadius() === INNER_SYSTEM ? 'Inner planets' : 'Full system';
-  $('zoom-in').setAttribute('aria-disabled', String(solar.radius <= CLOSEST_SYSTEM));
+  $('zoom-in').setAttribute('aria-disabled', String(solar.radius <= closestSolarRadius()));
   $('zoom-out').setAttribute('aria-disabled', String(solar.radius >= FULL_SYSTEM));
-  const span = (2 * solar.radius).toLocaleString('en-US', { maximumFractionDigits: 2 });
-  $('view-badge').textContent = `${span} AU across short side · Markers enlarged`;
+  $('view-badge').textContent = 'Not to scale';
 }
 
 function centerSolar(focus, radius) {
@@ -407,7 +408,7 @@ solarBody.addEventListener('change', () => {
   if (focus < 0 || mode !== 'solar') return;
   welcomeDismissed = true;
   showPanel(null, false);
-  centerSolar(focus, focus === 0 ? FULL_SYSTEM : .5);
+  centerSolar(focus, focus === 0 ? FULL_SYSTEM : 2.65 * solarBodyExtent(focus));
 });
 explore.addEventListener('click', () => dismissWelcome(true));
 $('solar-zoom-preset').addEventListener('click', () => centerSolar(0, solarPresetRadius()));
@@ -788,7 +789,7 @@ telescope.addEventListener('keydown', escapeTelescope);
 
 function zoom(factor) {
   if (mode === 'solar') {
-    const radius = clamp(solar.radius * factor, CLOSEST_SYSTEM, FULL_SYSTEM);
+    const radius = clamp(solar.radius * factor, closestSolarRadius(), FULL_SYSTEM);
     if (radius !== solar.radius) centerSolar(solar.focus, radius);
     return;
   }
@@ -886,7 +887,7 @@ playback.startLive(Date.now(), performance.now());
 updatePlaybackBounds();
 $('clock-context').textContent = 'Simulation time (UTC)';
 if (globe) {
-  solarRenderer = solarView(globe.renderer, $('solar-labels'));
+  solarRenderer = solarView(globe.renderer, globe.surfaces, $('solar-labels'));
   mode = 'solar';
   $('title').textContent = 'Solar System';
 } else noGlobe();

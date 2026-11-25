@@ -3,7 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { after, before, test } from 'node:test';
 import { chromium, devices } from 'playwright-core';
+import { Vector3 } from 'three';
 import { solarReference } from './fixtures/solar-horizons.js';
+import { solarDisplayPosition } from '../src/solar-display.js';
+import { FULL_SYSTEM, INNER_SYSTEM, solarBodyExtent, solarCamera } from '../src/solar-view.js';
 
 const files = new Map([['', ['index.html', 'text/html']], ['styles.css', ['styles.css', 'text/css']],
   ['app.js', ['app.js', 'text/javascript']]]);
@@ -58,10 +61,10 @@ async function captureLayout(page, name, folder = process.env.LAYOUT_SCREENSHOTS
 function controlledFrames() {
   let now = 0, wall = Date.parse('2024-04-08T12:00:00.000Z'), callbacks = [];
   window.solarDraws = 0;
-  const draw = WebGL2RenderingContext.prototype.drawElements;
-  WebGL2RenderingContext.prototype.drawElements = function (...args) {
+  const clear = WebGL2RenderingContext.prototype.clear;
+  WebGL2RenderingContext.prototype.clear = function (mask) {
     if (document.getElementById('viewport')?.classList.contains('solar')) window.solarDraws++;
-    return draw.apply(this, args);
+    return clear.call(this, mask);
   };
   Date.now = () => wall;
   window.setWallTime = iso => { wall = Date.parse(iso); };
@@ -138,31 +141,44 @@ async function chooseCity(page, name) {
 
 const captureSolar = (page, name) => captureLayout(page, name, process.env.SOLAR_SCREENSHOTS);
 
-// Compare actual marker pixels against independently sampled positions, not the app's projection.
-async function solarMarkerPixels(page, span, checks) {
-  const image = await region(page).screenshot({ scale: 'css' });
-  const results = await page.evaluate(async ({ png, span, checks }) => {
+// Check rendered pixels at the projections of independently sampled heliocentric coordinates.
+async function solarPixels(page, radius, names, focus = 'Sun') {
+  const view = region(page);
+  const { width, height } = await view.boundingBox();
+  const points = new Map([['Sun', new Vector3()], ...solarReference[0][1].map(([body, , ...xyz]) =>
+    [body, new Vector3(...solarDisplayPosition(xyz))])]);
+  const camera = solarCamera(width, height, radius, points.get(focus));
+  const checks = names.map(body => {
+    const { x, y } = points.get(body).clone().project(camera);
+    return [body, Math.round(width * (1 + x) / 2), Math.round(height * (1 - y) / 2)];
+  });
+  const image = await view.screenshot({ scale: 'css' });
+  const results = await page.evaluate(async ({ png, checks }) => {
     const image = new Image(); image.src = `data:image/png;base64,${png}`; await image.decode();
     const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(image, 0, 0);
-    const scale = Math.min(image.width, image.height) / span;
-    return checks.map(([body, x, y, rgb]) => {
-      const px = Math.round(image.width / 2 + x * scale);
-      const py = Math.round(image.height / 2 - y * scale);
-      return [body, [...ctx.getImageData(px, py, 1, 1).data.slice(0, 3)], rgb];
+    const pixel = (x, y) => ctx.getImageData(x, y, 1, 1).data;
+    const brightness = ([r, g, b]) => r + g + b;
+    const background = brightness(pixel(0, 0));
+    return checks.map(([body, x, y]) => {
+      const center = brightness(pixel(x, y));
+      // Read across the sphere's interior, not its antialiased silhouette.
+      const width = Math.min(x, image.width - x);
+      const row = ctx.getImageData(x - width, y, width * 2, 1).data;
+      const value = i => row[4 * i] + row[4 * i + 1] + row[4 * i + 2];
+      let left = width, right = width;
+      while (left > 0 && value(left - 1) > background + 30) left--;
+      while (right + 1 < width * 2 && value(right + 1) > background + 30) right++;
+      const quarter = Math.floor((right - left) / 4);
+      const interior = [value(left + quarter), value(width), value(right - quarter)];
+      return [body, center - background, right - left + 1, Math.max(...interior) - Math.min(...interior)];
     });
-  }, { png: image.toString('base64'), span, checks });
-  for (const [body, actual, expected] of results) assert.deepEqual(actual, expected, body);
+  }, { png: image.toString('base64'), checks });
+  for (const [body, contrast] of results) assert.ok(contrast > 30, `${body} has visible pixels: ${JSON.stringify(results)}`);
+  return Object.fromEntries(results.map(([body, , diameter, shading]) => [body, { diameter, shading }]));
 }
-const solarColors = {
-  Sun: [255, 205, 119], Mercury: [191, 193, 203], Venus: [234, 193, 150],
-  Earth: [116, 191, 235], Mars: [238, 150, 127], Pluto: [208, 186, 196],
-};
-const solarChecks = names => names.map(body => {
-  const xy = body === 'Sun' ? [0, 0] : solarReference[0][1].find(row => row[0] === body).slice(2, 4);
-  return [body, ...xy, solarColors[body]];
-});
+const allSolarBodies = ['Sun', ...solarReference[0][1].map(([body]) => body)];
 
 test('fresh live Solar System opens and reloads without cheese; keyboard dismissal and picking preserve playback', async t => {
   const { page, errors, requests } = await opened(t, { viewport: { width: 1220, height: 900 } }, controlledFrames, false);
@@ -177,7 +193,7 @@ test('fresh live Solar System opens and reloads without cheese; keyboard dismiss
   assert.deepEqual(await picker.locator('option').allTextContents(),
     ['Sun', 'Mercury', 'Venus', 'Earth', 'Mars', 'Jupiter', 'Saturn', 'Uranus', 'Neptune', 'Pluto (dwarf planet)']);
   await frame(fixed);
-  await solarMarkerPixels(page, 112, solarChecks(['Sun', 'Pluto']));
+  await page.getByText('Not to scale', { exact: true }).waitFor();
   await openPanel(page, 'Time');
   assert.ok(await button(page, 'Pause').isEnabled());
   await page.getByLabel('Playback speed').selectOption('3600');
@@ -191,10 +207,8 @@ test('fresh live Solar System opens and reloads without cheese; keyboard dismiss
   assert.equal(await picker.inputValue(), 'Pluto');
   await frame('2024-04-08T12:00:02.000Z');
   assert.equal(await clock(page), '2024-04-08T14:00:00.000Z');
-  await solarMarkerPixels(page, 1, [['Pluto', 0, 0, solarColors.Pluto]]);
   await button(page, 'Full system').press('Enter');
   assert.equal(await picker.inputValue(), 'Sun');
-  await page.getByText('112 AU across short side · Markers enlarged').waitFor();
   await earthEntry(page, 'Try demo sky');
   // Revealing Telescope changes the stage height. Let native layout deliver
   // the resize, then step the controlled frames through buffer clear and paint.
@@ -245,18 +259,18 @@ test('solar render work is bounded and paused clock edits repaint without waitin
     window.solarDraws = 0; window.stepFrames(count, delta);
     return window.solarDraws;
   }, [count, delta]);
-  assert.equal(await draws(3, 10), 10, 'all ten markers draw on startup and not again within the live second');
+  assert.equal(await draws(3, 10), 1, 'one scene paint on startup and none again within the live second');
   await openPanel(page, 'Time');
   await page.getByLabel('Playback speed').selectOption('3600');
   const accelerated = await draws(100, 10);
-  t.diagnostic(`At 3600×: ${accelerated / 10} map paints over 100 frames spanning 1 second`);
-  assert.equal(accelerated, 200, 'one ten-marker render every 50 ms at accelerated playback');
+  t.diagnostic(`At 3600×: ${accelerated} scene paints over 100 frames spanning 1 second`);
+  assert.equal(accelerated, 20, 'one scene render every 50 ms at accelerated playback');
   await button(page, 'Pause').click();
   // Flush the pending instant from the Pause click before measuring idle work.
   await draws(1, 1);
   assert.equal(await draws(100, 10), 0, 'paused view does no WebGL work');
   await page.getByLabel('Enter local date').fill('2040-01-01');
-  assert.equal(await draws(1, 1), 10, 'editing while paused draws on the very next frame');
+  assert.equal(await draws(1, 1), 1, 'editing while paused draws on the very next frame');
   assert.match(await clock(page), /^2040-01-01T/);
   await button(page, 'Close Time').click();
   await button(page, 'Explore').click();
@@ -265,20 +279,21 @@ test('solar render work is bounded and paused clock edits repaint without waitin
   assert.deepEqual(errors, []);
 });
 
-for (const phone of [false, true]) test(`true-distance Solar System markers and zoom on ${phone ? 'phone' : 'desktop'}`, async t => {
+for (const phone of [false, true]) test(`3D Solar System framing, shading and zoom on ${phone ? 'phone' : 'desktop'}`, async t => {
   const { page, errors } = await opened(t, phone ?
     { ...devices['iPhone 13'], viewport: { width: 390, height: 664 } } :
-    { viewport: { width: 1220, height: 900 } });
+    { viewport: { width: 1220, height: 900 } }, phone ? watchOrbitBake : undefined);
   const act = phone ? 'tap' : 'click';
   await inSolar(page);
   await captureSolar(page, `${phone ? 'phone' : 'desktop'}-welcome`);
   await button(page, 'Explore')[act]();
-  await solarMarkerPixels(page, 112, solarChecks(['Sun', 'Pluto']));
+  const full = await solarPixels(page, FULL_SYSTEM, allSolarBodies);
   await captureSolar(page, `${phone ? 'phone' : 'desktop'}-full`);
   await button(page, 'Inner planets')[act]();
-  await solarMarkerPixels(page, 3.7, solarChecks(['Sun', 'Mercury', 'Venus', 'Earth', 'Mars']));
+  const inner = await solarPixels(page, INNER_SYSTEM, allSolarBodies.slice(0, 5));
+  assert.ok(inner.Sun.diameter > full.Sun.diameter * 4);
   await captureSolar(page, `${phone ? 'phone' : 'desktop'}-inner`);
-  const badge = page.locator('#view-badge');
+  await page.getByText('Not to scale', { exact: true }).waitFor();
   if (phone) {
     for (const target of [solarPicker(page), button(page, 'Full system'), button(page, 'Zoom in'), button(page, 'Zoom out')]) {
       const { width, height } = await target.boundingBox();
@@ -287,18 +302,26 @@ for (const phone of [false, true]) test(`true-distance Solar System markers and 
     const session = await page.context().newCDPSession(page);
     const { x, y } = await region(page).boundingBox();
     await touchGesture(session, [[[x + 110, y + 120], [x + 190, y + 120]], [[x + 70, y + 120], [x + 230, y + 120]]]);
-    await badge.getByText(/^1.85 AU/).waitFor();
+    const closer = await solarPixels(page, INNER_SYSTEM / 2, ['Sun']);
+    assert.ok(closer.Sun.diameter > inner.Sun.diameter * 1.5);
     await solarPicker(page).tap();
     // Native OS chooser contents are not scriptable in emulated Chromium.
     await solarPicker(page).selectOption('Earth');
+    await page.waitForFunction(() => window.orbitBake.uploads >= 2);
     await captureSolar(page, 'phone-earth-centered');
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   } else {
     await wheelScene(page, 100);
-    await badge.getByText(/^4.52 AU/).waitFor();
+    const farther = await solarPixels(page, INNER_SYSTEM * Math.exp(.2), ['Sun']);
+    assert.ok(farther.Sun.diameter < inner.Sun.diameter * .9);
   }
+  const body = phone ? 'Pluto' : 'Saturn';
+  await solarPicker(page).selectOption(body);
+  const focused = await solarPixels(page, 2.65 * solarBodyExtent(allSolarBodies.indexOf(body)), [body], body);
+  assert.ok(focused[body].diameter > 30 && focused[body].shading > 20, JSON.stringify(focused));
+  await captureSolar(page, `${phone ? 'phone' : 'desktop'}-${body.toLowerCase()}-centered`);
   await button(page, 'Full system')[act]();
-  await solarMarkerPixels(page, 112, solarChecks(['Sun', 'Pluto']));
+  await solarPixels(page, FULL_SYSTEM, ['Sun', 'Pluto']);
   assert.deepEqual(errors, []);
 });
 

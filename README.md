@@ -1,6 +1,6 @@
 # Earth Sky
 
-A static planetarium for exploring the Solar System and looking up from the surfaces of Earth and its Moon. Each visit opens on a live, Sun-centered map. Dismiss the welcome with **Explore**, use **Inner planets** to zoom in, or center a world using the body picker. The map uses modeled heliocentric positions and a single distance scale; its markers are enlarged for visibility.
+A static planetarium for exploring the Solar System and looking up from the surfaces of Earth and its Moon. Each visit opens on a live, Sun-centered 3D view. Dismiss the welcome with **Explore**, use **Inner planets** to zoom in, or center a world using the body picker. The view uses modeled heliocentric positions but compresses distances and enlarges bodies for visibility. It is **not to scale**.
 
 To see the sky from Earth, open **Location** and choose **Use my location**, **Pick a place** (search built-in cities, enter coordinates, or place a globe pin), or **Try demo sky** (Reykjavík, no location request). If WebGL or location permission is unavailable, you can still pick a city, enter coordinates, or try the demo.
 
@@ -20,7 +20,7 @@ npm run build
 python3 -m http.server 8000 --bind 127.0.0.1 --directory dist
 ```
 
-Open <http://127.0.0.1:8000/>. Do not open the source HTML directly. `dist/` is the complete static output; its relative URLs also work under a project path such as `/planetarium/`. Browser location requires a secure context (HTTPS or loopback). The surface sky uses Canvas 2D and does not require WebGL 2. The Solar System map and globe features, including globe pins, require WebGL 2.
+Open <http://127.0.0.1:8000/>. Do not open the source HTML directly. `dist/` is the complete static output; its relative URLs also work under a project path such as `/planetarium/`. Browser location requires a secure context (HTTPS or loopback). The surface sky uses Canvas 2D and does not require WebGL 2. The 3D Solar System and globe features, including globe pins, require WebGL 2.
 
 Use the date dial or a date field for large jumps, and the time-of-day dial or time field for finer changes. Edits pause playback. Drag the sky or use arrow keys to look around; in globe mode, drag to orbit and pinch, scroll, or use the zoom buttons. In pin mode, click/tap Earth or use the viewport's arrow keys and Enter to pin the center. The orbit overview compresses the separation and enlarges the Moon; the default globe mode does neither. The surface marker and its label are annotations, not physical objects.
 
