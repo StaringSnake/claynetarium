@@ -422,13 +422,19 @@ test('phone Solar drag and pinch do not pick, and a body tap follows directly wi
   const step = () => page.evaluate(() => window.stepFrames(1, 16));
   const picker = solarPicker(page);
   const scene = region(page);
-  // Touch feedback can persist on the relabeled zoom preset. Compare the scene,
-  // not the button state; hide the controls only while taking the comparison.
-  const solarFrame = () => scene.screenshot({ style: '#zoom { visibility: hidden; }' });
   const session = await page.context().newCDPSession(page);
   await button(page, 'Explore').tap();
   await button(page, 'Inner planets').tap();
   await step();
+  // Clip above the overlays so transient touch feedback stays out of the
+  // comparison without injecting CSS or changing the visible controls.
+  const bounds = await scene.boundingBox();
+  const zoom = await scene.getByRole('group', { name: 'Scene zoom' }).boundingBox();
+  const badge = await scene.getByText('Not to scale', { exact: true }).boundingBox();
+  const x0 = Math.ceil(bounds.x), y0 = Math.ceil(bounds.y);
+  const clip = { x: x0, y: y0, width: Math.floor(bounds.x + bounds.width) - x0,
+    height: Math.floor(Math.min(zoom.y, badge.y)) - y0 };
+  const solarFrame = () => page.screenshot({ clip });
   const hit = await solarPoint(page, INNER_SYSTEM, 'Venus');
   const [x, y] = hit;
   const original = await solarFrame();
