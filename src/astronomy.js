@@ -97,10 +97,25 @@ export const solarBodies = ['Sun', 'Mercury', 'Venus', 'Earth', 'Mars',
 
 // Geometric heliocentric vectors in AU, in the fixed J2000 ecliptic frame.
 const toEcliptic = A.Rotation_EQJ_ECL();
+function heliocentricEcliptic(body, time) {
+  const { x, y, z } = A.RotateVector(toEcliptic, A.HelioVector(body, time));
+  return [x, y, z];
+}
+
 export function solarSystemAt(instant) {
   const time = A.MakeTime(new Date(instant));
-  return solarBodies.map(body => {
-    const { x, y, z } = A.RotateVector(toEcliptic, A.HelioVector(body, time));
-    return [x, y, z];
+  return solarBodies.map(body => heliocentricEcliptic(body, time));
+}
+
+// Approximate sidereal periods in days, Mercury through Pluto. Used only for
+// choosing the sampling interval; the points themselves come from the ephemeris.
+const orbitalDays = [87.969, 224.701, 365.256, 686.980, 4332.59, 10759.22, 30688.5, 60182, 90560];
+export function solarOrbitGuides() {
+  const epoch = Date.UTC(1900, 0, 1);
+  const samples = 256;
+  return solarBodies.slice(1).map((body, index) => {
+    const points = Array.from({ length: samples }, (_, i) =>
+      heliocentricEcliptic(body, A.MakeTime(new Date(epoch + orbitalDays[index] * DAY * i / samples))));
+    return [...points, points[0]]; // A short closing chord, not a prediction.
   });
 }

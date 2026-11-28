@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { after, before, test } from 'node:test';
 import { chromium, devices } from 'playwright-core';
 import { Vector3 } from 'three';
-import { solarReference } from './fixtures/solar-horizons.js';
+import { solarGuideVertices, solarReference } from './fixtures/solar-horizons.js';
 import { solarDisplayPosition } from '../src/solar-display.js';
 import { FULL_SYSTEM, INNER_SYSTEM, solarBodyExtent, solarCamera } from '../src/solar-view.js';
 
@@ -61,10 +61,16 @@ async function captureLayout(page, name, folder = process.env.LAYOUT_SCREENSHOTS
 function controlledFrames() {
   let now = 0, wall = Date.parse('2024-04-08T12:00:00.000Z'), callbacks = [];
   window.solarDraws = 0;
+  window.guideDraws = [];
   const clear = WebGL2RenderingContext.prototype.clear;
   WebGL2RenderingContext.prototype.clear = function (mask) {
     if (document.getElementById('viewport')?.classList.contains('solar')) window.solarDraws++;
     return clear.call(this, mask);
+  };
+  const instanced = WebGL2RenderingContext.prototype.drawElementsInstanced;
+  WebGL2RenderingContext.prototype.drawElementsInstanced = function (mode, count, type, offset, instances) {
+    if (document.getElementById('viewport')?.classList.contains('solar')) window.guideDraws.push(instances);
+    return instanced.call(this, mode, count, type, offset, instances);
   };
   Date.now = () => wall;
   window.setWallTime = iso => { wall = Date.parse(iso); };
@@ -99,7 +105,7 @@ async function inEarthSky(page) {
     const sky = document.getElementById('sky');
     return getComputedStyle(sky).opacity === '1' && sky.getContext('2d').getImageData(0, 0, 1, 1).data[3] === 255;
   });
-  for (const id of ['space', 'solar-welcome', 'solar-body', 'solar-labels', 'zoom', 'view-badge']) {
+  for (const id of ['space', 'solar-welcome', 'solar-body', 'solar-labels', 'solar-paths', 'zoom', 'view-badge']) {
     assert.equal(await page.locator(`#${id}`).isVisible(), false, id);
   }
 }
@@ -152,6 +158,22 @@ async function solarPoint(page, radius, body) {
   const camera = solarCamera(width, height, radius, solarPoints.get('Sun'));
   const point = solarPoints.get(body).clone().project(camera);
   return [x + width * (1 + point.x) / 2, y + height * (1 - point.y) / 2];
+}
+
+async function samplePathPixels(scene, points) {
+  const image = await scene.screenshot({ scale: 'css' });
+  return scene.evaluate(async (_, { png, points }) => {
+    const image = new Image(); image.src = `data:image/png;base64,${png}`; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0);
+    return points.map(([x, y]) => {
+      const data = ctx.getImageData(Math.round(x) - 2, Math.round(y) - 2, 5, 5).data;
+      let maxGreen = 0;
+      for (let i = 1; i < data.length; i += 4) maxGreen = Math.max(maxGreen, data[i]);
+      return maxGreen;
+    });
+  }, { png: image.toString('base64'), points });
 }
 
 // Check rendered pixels at the projections of independently sampled heliocentric coordinates.
@@ -269,16 +291,22 @@ test('solar render work is bounded and paused clock edits repaint without waitin
     window.solarDraws = 0; window.stepFrames(count, delta);
     return window.solarDraws;
   }, [count, delta]);
-  assert.equal(await draws(3, 10), 1, 'one scene paint on startup and none again within the live second');
+  assert.equal(await draws(1, 10), 1, 'the first Solar paint shows the worlds without guides');
+  assert.deepEqual(await page.evaluate(() => window.guideDraws), []);
+  assert.equal(await draws(2, 10), 1, 'the next paint adds guides and then idles within the live second');
+  assert.deepEqual(await page.evaluate(() => window.guideDraws.splice(0)), Array(9).fill(256));
   await openPanel(page, 'Time');
   await page.getByLabel('Playback speed').selectOption('3600');
   const accelerated = await draws(100, 10);
   t.diagnostic(`At 3600×: ${accelerated} scene paints over 100 frames spanning 1 second`);
   assert.equal(accelerated, 20, 'one scene render every 50 ms at accelerated playback');
+  assert.deepEqual(await page.evaluate(() => window.guideDraws.splice(0)), Array(20 * 9).fill(256));
   await button(page, 'Pause').click();
   // Flush the pending instant from the Pause click before measuring idle work.
   await draws(1, 1);
+  await page.evaluate(() => { window.guideDraws.length = 0; });
   assert.equal(await draws(100, 10), 0, 'paused view does no WebGL work');
+  assert.deepEqual(await page.evaluate(() => window.guideDraws), []);
   await page.getByLabel('Enter local date').fill('2040-01-01');
   assert.equal(await draws(1, 1), 1, 'editing while paused draws on the very next frame');
   assert.match(await clock(page), /^2040-01-01T/);
@@ -286,6 +314,159 @@ test('solar render work is bounded and paused clock edits repaint without waitin
   await button(page, 'Explore').click();
   await button(page, 'Inner planets').click();
   assert.ok(await draws(1, 1) > 0, 'zoom repaints without another time change');
+  assert.deepEqual(errors, []);
+});
+
+for (const phone of [false, true]) test(`orbit guides render and can be picked or hidden on ${phone ? 'phone' : 'desktop'}`, async t => {
+  const { page, errors } = await opened(t, phone ?
+    { ...devices['iPhone 13'], viewport: { width: 390, height: 664 }, reducedMotion: 'reduce' } :
+    { viewport: { width: 1220, height: 900 }, reducedMotion: 'reduce' }, controlledFrames, false);
+  const act = phone ? 'tap' : 'click';
+  const input = (x, y) => (phone ? page.touchscreen.tap(x, y) : page.mouse.click(x, y));
+  const step = () => page.evaluate(() => window.stepFrames(2, 16));
+  const scene = region(page), picker = solarPicker(page), paths = button(page, 'Orbit paths');
+  const save = async name => {
+    if (process.env.SOLAR_SCREENSHOTS) await page.screenshot({
+      path: `${process.env.SOLAR_SCREENSHOTS}/${phone ? 'phone' : 'desktop'}-paths-${name}.png`, scale: 'css',
+    });
+  };
+  await openPanel(page, 'Time');
+  await button(page, 'Pause')[act]();
+  await button(page, 'Close Time')[act]();
+  await button(page, 'Explore')[act]();
+  await step();
+  const { x, y, width, height } = await scene.boundingBox();
+  const camera = solarCamera(width, height, FULL_SYSTEM, new Vector3());
+  const local = solarGuideVertices.filter(([body]) => body === 'Pluto').map(([, , , xyz]) => {
+    const point = new Vector3(...solarDisplayPosition(xyz)).project(camera);
+    return [width * (1 + point.x) / 2, height * (1 - point.y) / 2];
+  });
+  const hit = [x + local[0][0], y + local[0][1]];
+  const before = await samplePathPixels(scene, local);
+  assert.ok(before.every(green => green > 43 && green < 140), `visible guide pixels at both Horizons projections: ${before}`);
+  if (!phone) {
+    const highlighted = page.locator('#solar-labels').getByText('Pluto', { exact: true });
+    const burst = leave => scene.evaluate((viewport, { hit, leave }) => {
+      // Production reads viewport bounds once per hover check, never per raw event.
+      const bounds = viewport.getBoundingClientRect;
+      let reads = 0;
+      viewport.getBoundingClientRect = function () { reads++; return bounds.call(this); };
+      try {
+        for (let i = 0; i < 120; i++) viewport.dispatchEvent(new PointerEvent('pointermove', {
+          pointerType: 'mouse', bubbles: true, clientX: i === 119 ? hit[0] : hit[0] + 30, clientY: hit[1],
+        }));
+        const before = reads;
+        if (leave) viewport.dispatchEvent(new PointerEvent('pointerleave'));
+        window.stepFrames(1, 16);
+        return { before, after: reads, cursor: getComputedStyle(viewport).cursor };
+      } finally { delete viewport.getBoundingClientRect; }
+    }, { hit, leave });
+    assert.deepEqual(await burst(true), { before: 0, after: 0, cursor: 'grab' },
+      'pointer leave invalidates unprocessed input');
+    assert.deepEqual(await burst(false), { before: 0, after: 1, cursor: 'pointer' },
+      'the burst resolves only the latest hover at the next frame');
+    await page.mouse.move(x + 10, y + 10);
+    await step();
+    await page.mouse.move(...hit);
+    await step();
+    assert.equal(await highlighted.evaluate(el => getComputedStyle(el).textDecorationLine), 'underline');
+    assert.equal(await scene.evaluate(el => getComputedStyle(el).cursor), 'pointer');
+    const highlightedPixels = await samplePathPixels(scene, local);
+    assert.ok(highlightedPixels.every((green, i) => green > before[i] + 55));
+    await save('hover');
+    await page.mouse.move(x + 10, y + 10);
+    await step();
+    assert.deepEqual(await samplePathPixels(scene, local), before, 'leaving the guide restores its normal color');
+  }
+  if (phone) {
+    const session = await page.context().newCDPSession(page);
+    const [hx, hy] = hit;
+    await touchGesture(session, [[[hx, hy]], [[hx + 28, hy + 14]]]);
+    await step();
+    assert.equal(await picker.inputValue(), 'Sun', 'dragging from a guide does not pick');
+    await button(page, 'Full system').tap();
+    await step();
+    await touchGesture(session, [[[hx, hy], [hx + 40, hy]], [[hx, hy], [hx + 80, hy]]]);
+  } else await drag(page, ...hit, 16, 10);
+  await step();
+  assert.equal(await picker.inputValue(), 'Sun', 'the gesture release is not a guide selection');
+  await picker.selectOption('Sun');
+  await step();
+  await input(...hit);
+  await step();
+  assert.equal(await picker.inputValue(), 'Pluto');
+  await solarPixels(page, FULL_SYSTEM, ['Pluto'], 'Pluto');
+
+  await button(page, 'View')[act]();
+  assert.equal(await paths.getAttribute('aria-pressed'), 'true', 'default is on; focus keeps it on');
+  if (phone) {
+    const size = await paths.boundingBox();
+    assert.ok(size.width >= 44 && size.height >= 44);
+    await paths.tap();
+  } else {
+    await page.keyboard.press('Tab'); // Move from Close View to the first panel control.
+    assert.ok(await paths.evaluate(el => el === document.activeElement && el.matches(':focus-visible')));
+    await paths.press('Space');
+  }
+  assert.equal(await paths.getAttribute('aria-pressed'), 'false');
+  await step();
+  await save('off-control');
+  await button(page, 'Close View')[act]();
+  await picker.selectOption('Sun');
+  await page.evaluate(() => { window.guideDraws.length = 0; });
+  await step();
+  assert.deepEqual(await page.evaluate(() => window.guideDraws), [], 'hidden paths are not submitted to WebGL');
+  const hidden = await samplePathPixels(scene, local);
+  assert.ok(hidden.every(green => green < 24), `background replaces guide pixels: ${hidden}`);
+  await save('off-overview');
+  if (!phone) {
+    await page.mouse.move(...hit);
+    await step();
+    assert.equal(await scene.evaluate(el => getComputedStyle(el).cursor), 'grab');
+  }
+  await input(...hit);
+  assert.equal(await picker.inputValue(), 'Sun', 'the same point cannot pick while guides are hidden');
+  await input(...await solarPoint(page, FULL_SYSTEM, 'Jupiter'));
+  await step();
+  assert.equal(await picker.inputValue(), 'Jupiter', 'direct body picking is unchanged');
+  await picker.selectOption('Neptune');
+  await step();
+  assert.equal(await picker.inputValue(), 'Neptune', 'the picker remains an unambiguous alternative');
+  await picker.selectOption('Sun');
+  await step();
+  if (!phone) {
+    await earthEntry(page, 'Pick a place');
+    await button(page, 'Place globe pin').click();
+    await heading(page, 'Pick a globe location');
+    await openPanel(page, 'View');
+    assert.equal(await paths.isVisible(), false, 'the true-scale globe has no Solar paths control');
+    await button(page, 'Back to Solar System').click();
+    await inSolar(page);
+    await step();
+  }
+  await button(page, 'View')[act]();
+  assert.equal(await paths.getAttribute('aria-pressed'), 'false', 'off survives focus and Sun reset');
+  await paths[act]();
+  await button(page, 'Close View')[act]();
+  await step();
+  assert.deepEqual(await samplePathPixels(scene, local), before);
+  // Neptune and Pluto cross left of the Sun at the default camera angle;
+  // Pluto is in front at this crossing, on both widths.
+  const crossing = phone ? [68.47, 270.77] : [365.38, 466.22];
+  for (let i = 0; i < 2; i++) {
+    await input(x + crossing[0], y + crossing[1]);
+    await step();
+    assert.equal(await picker.inputValue(), 'Pluto', 'frontmost path wins repeatably where guides cross');
+    await picker.selectOption('Sun');
+    await step();
+  }
+  assert.equal(await clock(page), fixed);
+  await button(page, 'View')[act]();
+  await paths[act]();
+  await page.reload();
+  await inSolar(page);
+  await openPanel(page, 'View');
+  assert.equal(await paths.getAttribute('aria-pressed'), 'true', 'a new visit defaults back to on');
   assert.deepEqual(errors, []);
 });
 
@@ -419,13 +600,13 @@ test('phone Solar drag and pinch do not pick, and a body tap follows directly wi
   const { page, errors } = await opened(t, {
     ...devices['iPhone 13'], viewport: { width: 390, height: 664 }, reducedMotion: 'reduce',
   }, controlledFrames, false);
-  const step = () => page.evaluate(() => window.stepFrames(1, 16));
+  const step = (count = 1) => page.evaluate(n => window.stepFrames(n, 16), count);
   const picker = solarPicker(page);
   const scene = region(page);
   const session = await page.context().newCDPSession(page);
   await button(page, 'Explore').tap();
   await button(page, 'Inner planets').tap();
-  await step();
+  await step(2); // Compare the same fully initialized scene before and after the gesture.
   // Clip above the overlays so transient touch feedback stays out of the
   // comparison without injecting CSS or changing the visible controls.
   const bounds = await scene.boundingBox();
@@ -442,7 +623,7 @@ test('phone Solar drag and pinch do not pick, and a body tap follows directly wi
   await touchGesture(session, [[sun], [[sun[0] - 55, sun[1] - 30]], [sun]]);
   await step();
   assert.equal(await picker.inputValue(), 'Sun');
-  assert.deepEqual(await solarFrame(), original, 'round trip restores the angle without selecting the Sun');
+  assert.ok((await solarFrame()).equals(original), 'round trip restores the angle without selecting the Sun');
   await touchGesture(session, [[hit], [[x + 40, y + 35]], [[x + 85, y + 55]]]);
   await step();
   assert.equal(await picker.inputValue(), 'Sun');
@@ -738,7 +919,7 @@ test('the scene keeps its mode-specific accessible description when View closes'
     await button(page, 'Close View').click();
     assert.equal(await description(), closed);
   }
-  await check(/Drag or use arrow keys to orbit.*Click or tap a world, or use the body picker/);
+  await check(/Drag or use arrow keys to orbit.*Click or tap a world or its orbit path, or use the body picker/);
   await openPanel(page, 'Location');
   await button(page, 'Try demo sky').click();
   await check(/Open Telescope/);

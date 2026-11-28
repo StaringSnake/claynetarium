@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Frustum, Matrix4, Vector3 } from 'three';
+import { Frustum, Line3, Matrix4, Vector3 } from 'three';
 import { DAY, FIRST_DAY, LAST_DAY, civilClock, dateText, offsetText } from '../src/clock.js';
-import { skyAt, solarEvents, solarBodies, solarSystemAt, spaceAt, EARTH_KM, MOON_KM } from '../src/astronomy.js';
-import { solarDisplayPosition } from '../src/solar-display.js';
+import { skyAt, solarEvents, solarBodies, solarOrbitGuides, solarSystemAt, spaceAt, EARTH_KM, MOON_KM } from '../src/astronomy.js';
+import { solarDisplayPosition, unpackSolarGuide } from '../src/solar-display.js';
+import { solarGuideBuildOptions } from '../scripts/solar-guide-asset.mjs';
 import { solarBodyExtent, solarCamera, FULL_SYSTEM, INNER_SYSTEM } from '../src/solar-view.js';
 import { cities, coordinateSite, findCities } from '../src/places.js';
 import { lunarSites, lunarSkyAt, solarLimbAltitude, nextLunarSolarEvents } from '../src/lunar.js';
 import { earthRows, apolloSun, solarBrackets } from './fixtures/lunar-horizons.js';
-import { solarReference } from './fixtures/solar-horizons.js';
+import { solarGuideVertices, solarReference } from './fixtures/solar-horizons.js';
 
 const day = value => Date.parse(value) / DAY;
 const city = name => cities.find(place => place.name === name);
@@ -40,6 +41,61 @@ test('display mapping keeps the Sun at the origin and compresses distances witho
   }
   const ratio = Math.hypot(...long) / Math.hypot(...short);
   assert.ok(ratio > 1 && ratio < 16);
+});
+
+test('guide vertices match independent geometric Horizons samples before remapping', () => {
+  const guides = solarOrbitGuides();
+  assert.equal(guides.length, solarBodies.length - 1, 'Sun has no orbit guide');
+  for (const points of guides) {
+    assert.equal(points.length, 257, 'bounded fixed sampling');
+    assert.deepEqual(points.at(-1), points[0], 'the guide is closed');
+  }
+  for (const [body, index, date, xyz] of solarGuideVertices) {
+    const i = solarBodies.indexOf(body);
+    const point = guides[i - 1][index];
+    close(Math.hypot(...point.map((v, component) => v - xyz[component])), 0,
+      body === 'Mercury' ? .00004 : .0025, `${body} at ${date}`);
+    assert.deepEqual(point, solarSystemAt(Date.parse(date))[i]);
+  }
+  for (const [date, rows] of solarReference) {
+    for (const [body, , ...xyz] of rows) {
+      const i = solarBodies.indexOf(body);
+      const guide = guides[i - 1].map(p => new Vector3(...p));
+      // The fixed curve is illustrative; allow for chord and epoch differences.
+      close(guideDistance(new Vector3(...xyz), guide), 0, i <= 4 ? .0005 : .005, `${body} at ${date}`);
+    }
+  }
+});
+
+test('the bundled guide asset is deterministic, bounded, and uses the same display positions as the model', () => {
+  const encoded = solarGuideBuildOptions().define.SOLAR_GUIDE_DATA;
+  assert.ok(encoded.length < 38_000, 'keep the offline payload bounded');
+  assert.equal(solarGuideBuildOptions().define.SOLAR_GUIDE_DATA, encoded);
+  assert.deepEqual(JSON.parse(encoded).map(unpackSolarGuide), solarOrbitGuides().map(points =>
+    new Float32Array(points.flatMap(solarDisplayPosition))));
+});
+
+function guideDistance(body, guide) {
+  const segment = new Line3(), closest = new Vector3();
+  let distance = Infinity;
+  for (let j = 1; j < guide.length; j++) {
+    segment.set(guide[j - 1], guide[j]).closestPointToPoint(body, true, closest);
+    distance = Math.min(distance, closest.distanceTo(body));
+  }
+  return distance;
+}
+
+test('illustrated guide segments stay within a small fraction of each body on sampled dates', () => {
+  const guides = solarOrbitGuides().map(points => points.map(p => new Vector3(...solarDisplayPosition(p))));
+  for (let year = 1900; year <= 2100; year += 1) for (const month of [0, 3, 6, 9]) {
+    const positions = solarSystemAt(Date.UTC(year, month, 1));
+    for (const [i, guide] of guides.entries()) {
+      const body = new Vector3(...solarDisplayPosition(positions[i + 1]));
+      const distance = guideDistance(body, guide);
+      assert.ok(distance < .02 && distance < .025 * solarBodyExtent(i + 1),
+        `${solarBodies[i + 1]} ${year}/${month + 1}: ${distance} display units`);
+    }
+  }
 });
 
 test('perspective frustum fits full bodies through Pluto and zooms into the inner worlds on desktop and phone', () => {

@@ -23,3 +23,12 @@ export const solarReference = [
     ['Pluto', 999, 31.283400217792, -22.307642348324, -6.663547160100],
   ]],
 ];
+
+// Same geometric Horizons query, retrieved for the guide's exact vertex times
+// (Mercury 199, Pluto 999; DE441 and plu060_merged). Pluto spans both sides
+// of the ecliptic here, with Z far from zero.
+export const solarGuideVertices = [
+  ['Mercury', 64, '1900-01-22T23:48:50.400Z', [-.02624717780635860, -.4628977753377397, -.03533706901297991]],
+  ['Pluto', 56, '1954-03-29T00:00:00.000Z', [-28.32461031412366, 20.10057915197307, 6.040028173727658]],
+  ['Pluto', 166, '2060-10-10T12:00:00.000Z', [41.78109368648836, -6.460348908851729, -11.39311204635029]],
+];
