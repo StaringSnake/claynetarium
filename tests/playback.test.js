@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createPlayback } from '../src/playback.js';
+import { DAY, SECOND } from '../src/clock.js';
 
 function started(wall = 1000) {
   const playback = createPlayback();
@@ -100,4 +101,30 @@ test('replacing bounds within range preserves the active playback anchor', () =>
 
   assert.equal(playback.instant, 2200);
   assert.equal(playback.playing, true);
+});
+
+test('day, week, approximate month and approximate year rates advance exact fixed durations', () => {
+  const playback = createPlayback();
+  let real = 0, instant = Date.UTC(2024, 3, 8, 12);
+  playback.startLive(instant, real);
+  playback.setBounds(Date.UTC(1900, 0, 1), Date.UTC(2100, 11, 31, 23, 59, 59, 999));
+  for (const days of [1, 7, 30, 365]) {
+    playback.setRate(days * DAY / SECOND, real);
+    assert.equal(playback.instant, instant, 'changing speed preserves the sampled anchor');
+    playback.advance(real += SECOND, 0);
+    assert.equal(playback.instant, instant += days * DAY);
+  }
+  playback.toggle(real);
+  playback.setRate(DAY / SECOND, real);
+  playback.advance(real += SECOND, 0);
+  assert.equal(playback.instant, instant);
+  playback.toggle(real);
+  playback.advance(real + SECOND, 0);
+  assert.equal(playback.instant, instant + DAY);
+
+  playback.edit(playback.end - DAY / 2);
+  playback.toggle(real);
+  assert.equal(playback.advance(real + SECOND, 0), true, 'fast playback stops at the date bound');
+  assert.equal(playback.instant, playback.end);
+  assert.equal(playback.playing, false);
 });

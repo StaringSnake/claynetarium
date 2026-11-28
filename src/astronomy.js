@@ -107,6 +107,34 @@ export function solarSystemAt(instant) {
   return solarBodies.map(body => heliocentricEcliptic(body, time));
 }
 
+function solarDirection(vector) {
+  const { x, y, z } = A.RotateVector(toEcliptic, vector);
+  return [x, z, -y]; // Match the renderer's J2000 ecliptic frame without distance compression.
+}
+
+// Where each body's local +Y (modeled pole) and +X (prime meridian) point.
+export function solarAxesAt(instant) {
+  const time = A.MakeTime(new Date(instant));
+  return solarBodies.map(body => {
+    if (body === 'Earth') {
+      // Greenwich apparent sidereal time is measured in the equator of date,
+      // not from the IAU node used for the other bodies' prime meridians.
+      const toJ2000 = A.Rotation_EQD_EQJ(time);
+      const sidereal = A.SiderealTime(time) * 15 * RAD;
+      const direction = (x, y, z) => solarDirection(A.RotateVector(toJ2000, new A.Vector(x, y, z, time)));
+      return { north: direction(0, 0, 1), prime: direction(Math.cos(sidereal), Math.sin(sidereal), 0) };
+    }
+    const { ra, dec, spin, north } = A.RotationAxis(body, time);
+    // IAU W is a signed rotation about north from the ascending node of
+    // the body's equator on the J2000 equator (RA of the pole + 90°).
+    const alpha = ra * 15 * RAD, delta = dec * RAD, w = (spin % 360) * RAD;
+    const c = Math.cos(w), s = Math.sin(w), a = Math.cos(alpha), b = Math.sin(alpha);
+    const prime = new A.Vector(-b * c - a * Math.sin(delta) * s,
+      a * c - b * Math.sin(delta) * s, Math.cos(delta) * s, time);
+    return { north: solarDirection(north), prime: solarDirection(prime) };
+  });
+}
+
 // Approximate sidereal periods in days, Mercury through Pluto. Used only for
 // choosing the sampling interval; the points themselves come from the ephemeris.
 const orbitalDays = [87.969, 224.701, 365.256, 686.980, 4332.59, 10759.22, 30688.5, 60182, 90560];

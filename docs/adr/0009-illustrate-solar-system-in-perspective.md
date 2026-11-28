@@ -4,6 +4,8 @@ Status: Accepted
 Date: 2026-11-25
 Author: Frontend Implementer
 
+Lighting amended by [ADR 0012](0012-sample-solar-orbits-and-spin-together.md).
+
 ## Context
 
 Issue #19 replaces the true-distance, face-on marker map in ADR 0008 with a readable 3D welcome like Earth orbit. Pluto must fit on narrow screens without making the inner worlds disappear. The modeled positions, future orbit guides, and existing true-scale Earth–Moon mode need to remain independent of the welcome's presentation.
