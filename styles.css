@@ -48,6 +48,9 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events
   position: absolute; top: 0; left: 0; width: max-content; visibility: hidden;
   color: #eef2f4; font-size: 14px; line-height: 18px; text-shadow: 0 1px 3px #070d17, 0 0 3px #070d17;
 }
+#solar-labels .path-hover { color: var(--accent); text-decoration: underline; }
+#solar-labels .path-key { inset: 8px auto auto 8px; background: #0d171f; padding: 4px 8px; border-radius: var(--radius); }
+.viewport.path-hover { cursor: pointer; }
 #loading, .view-badge, .zoom { position: absolute; inset: auto auto 8px 8px; }
 #loading, .view-badge { color: #e8f9f8; background: #0d171f; padding: 4px 8px; border-radius: var(--radius); }
 .view-badge { max-width: calc(100% - 116px); pointer-events: none; font-size: 14px; overflow-wrap: anywhere; }

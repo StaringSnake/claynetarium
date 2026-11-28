@@ -27,6 +27,8 @@ const DRAG_THRESHOLD = 5;
 let dragged = false, telescopePinch = null, solarPinch = false;
 const solar = { focus: 0, radius: FULL_SYSTEM, ...SOLAR_ORIENTATION };
 const solarBody = $('solar-body'), welcome = $('solar-welcome'), explore = $('explore-solar');
+const solarPaths = $('solar-paths');
+let showSolarPaths = true, pendingSolarHover;
 let welcomeDismissed = false;
 let solarPositions, solarInstant, solarSampleTime;
 const orbit = { theta: 0, latitude: 0, distance: 4.3, focus: 'earth', overview: false };
@@ -48,6 +50,7 @@ let openPanel = null;
 function updateWelcome() { welcome.hidden = mode !== 'solar' || welcomeDismissed || Boolean(openPanel); }
 
 function showPanel(toggle, focus = true) {
+  clearSolarHover();
   const previous = openPanel;
   if (previous) {
     previous.setAttribute('aria-expanded', 'false');
@@ -92,6 +95,7 @@ function notice(id, message) {
 function noGlobe() {
   const needsLocation = !site;
   const interrupted = Boolean(ride);
+  clearSolarHover();
   globe = rocket = solarRenderer = null; mode = 'surface'; flight = null;
   if (interrupted) cancelRide('3D was interrupted. You are still at the departure site and your clock was not reset.');
   showCompatibility();
@@ -302,6 +306,7 @@ function resize() {
   width = nextWidth; height = nextHeight; dpi = nextDpi; desktopRideBuffer = nextDesktopRideBuffer;
   if (!width || !height) return;
   if (!sceneChanged && !rideBufferChanged) return;
+  if (sceneChanged) clearSolarHover();
   if (sceneChanged) {
     const pixelsWide = Math.round(width * dpi), pixelsHigh = Math.round(height * dpi);
     if (skyCanvas.width !== pixelsWide) skyCanvas.width = pixelsWide;
@@ -352,6 +357,7 @@ function viewControls() {
   $('pin').disabled = !globe || Boolean(flight || ride);
   $('zoom').hidden = !(inSpace || inSolar) || Boolean(flight || ride);
   $('solar-zoom-preset').hidden = solarBody.hidden = $('solar-labels').hidden = !inSolar;
+  $('solar-path-controls').hidden = !inSolar;
   if (!inSolar) for (const id of ['zoom-in', 'zoom-out']) $(id).removeAttribute('aria-disabled');
   $('time-toggle').hidden = !site && !inSolar;
   $('orbit-tools').hidden = !site || !inSpace || Boolean(flight || ride);
@@ -359,7 +365,7 @@ function viewControls() {
   $('view-badge').hidden = !inSolar && (!site || !inSpace || Boolean(flight || ride));
   const help = ride ? 'Illustrative route, not to scale. The ride adds no simulation time.' :
     pinning ? 'Drag or use arrow keys to orbit. Tap Earth or press Enter to place a pin. Escape cancels.' :
-    inSolar ? 'Drag or use arrow keys to orbit. Pinch, scroll or use the zoom buttons. Click or tap a world, or use the body picker to follow it.' :
+    inSolar ? 'Drag or use arrow keys to orbit. Pinch, scroll or use the zoom buttons. Click or tap a world or its orbit path, or use the body picker to follow it.' :
       inSpace ? 'Drag or use arrow keys to orbit. Pinch, scroll or use the zoom buttons.' :
       telescopeActive ? 'Drag or use arrow keys to aim. Scroll or pinch to zoom, or use the magnification slider.' :
         showTelescope ? 'Drag or use arrow keys to aim. Open Telescope to magnify the center of the view.' :
@@ -372,7 +378,10 @@ function viewControls() {
   if (!inSpace && !inSolar) $('view-badge').textContent = '';
   view.classList.toggle('solar', inSolar);
   if (inSolar) updateSolarZoomControls();
-  else solarRenderer?.cancelFocus();
+  else {
+    clearSolarHover();
+    solarRenderer?.cancelFocus();
+  }
   updateWelcome();
   dirty = true;
 }
@@ -399,6 +408,7 @@ function updateSolarZoomControls() {
 }
 
 function centerSolar(focus, radius = focus === 0 ? FULL_SYSTEM : 2.65 * solarBodyExtent(focus)) {
+  clearSolarHover();
   if (focus && focus !== solar.focus && !motion.matches) solarRenderer.beginFocus(performance.now());
   else solarRenderer.cancelFocus();
   if (focus === 0) Object.assign(solar, SOLAR_ORIENTATION);
@@ -418,6 +428,14 @@ function followSolar(focus) {
 
 solarBody.replaceChildren(...solarBodies.map(body => new Option(body === 'Pluto' ? 'Pluto (dwarf planet)' : body, body)));
 solarBody.addEventListener('change', () => followSolar(solarBody.selectedIndex));
+solarPaths.addEventListener('click', () => {
+  if (mode !== 'solar') return;
+  showSolarPaths = !showSolarPaths;
+  solarPaths.setAttribute('aria-pressed', String(showSolarPaths));
+  clearSolarHover();
+  solarRenderer.setGuides(showSolarPaths);
+  dirty = true;
+});
 explore.addEventListener('click', () => dismissWelcome(true));
 $('solar-zoom-preset').addEventListener('click', () => centerSolar(0, solarPresetRadius()));
 
@@ -527,7 +545,19 @@ function draw(real) {
     const changed = updateSolar(real);
     const animating = solarRenderer.animating;
     if (animating && motion.matches) solarRenderer.cancelFocus();
-    if (dirty || changed || animating) solarRenderer.draw(solarPositions, solar, width, height, real);
+    const repaint = dirty || changed || animating || solarRenderer.guidesPending;
+    if (repaint || pendingSolarHover) {
+      let pendingHover;
+      if (pendingSolarHover) {
+        const { x, y } = pendingSolarHover;
+        if (document.elementFromPoint(x, y) === view) pendingHover = viewPoint(x, y);
+        else clearSolarHover();
+        pendingSolarHover = undefined;
+      }
+      const hovering = solarRenderer.draw(solarPositions, solar, width, height, real,
+        { repaint: repaint || dirty, positionsChanged: changed, pendingHover });
+      view.classList.toggle('path-hover', hovering);
+    }
     dirty = false;
     return;
   }
@@ -733,6 +763,7 @@ function rotate(dx, dy) {
   if (!site && mode === 'surface') return;
   if (mode === 'solar') {
     const preset = solarPresetRadius();
+    clearSolarHover();
     solarRenderer.cancelFocus();
     solar.theta = (solar.theta - dx * .007) % (2 * Math.PI);
     solar.latitude = clamp(solar.latitude + dy * .007, -1.55, 1.55);
@@ -807,6 +838,7 @@ function zoom(factor) {
   if (mode === 'solar') {
     const radius = clamp(solar.radius * factor, closestSolarRadius(), FULL_SYSTEM);
     if (radius === solar.radius && !solarRenderer.animating) return;
+    clearSolarHover();
     solarRenderer.cancelFocus();
     solar.radius = radius;
     updateSolarZoomControls();
@@ -854,6 +886,19 @@ function placePin(x, y) {
   else notice('pin-status', 'No Earth surface at that point. Tap Earth to place the pin.');
 }
 
+function clearSolarHover() {
+  pendingSolarHover = undefined;
+  if (solarRenderer?.clearHover()) {
+    view.classList.remove('path-hover');
+    dirty = true;
+  }
+}
+
+function viewPoint(x, y) {
+  const bounds = view.getBoundingClientRect();
+  return [(x - bounds.left) / bounds.width, (y - bounds.top) / bounds.height];
+}
+
 view.addEventListener('pointerdown', event => {
   if (flight || ride || event.target !== view || event.button !== 0 || pointers.size >= 2) return;
   const point = { x: event.clientX, y: event.clientY, type: event.pointerType, mode };
@@ -872,9 +917,15 @@ view.addEventListener('pointerdown', event => {
   }
   view.setPointerCapture(event.pointerId);
   pointers.set(event.pointerId, point);
+  if (mode === 'solar') clearSolarHover();
 });
 view.addEventListener('pointermove', event => {
   const before = pointers.get(event.pointerId);
+  if (!before && mode === 'solar' && showSolarPaths && !pointers.size && !event.buttons &&
+      event.pointerType !== 'touch' && !solarRenderer.animating) {
+    if (event.target !== view) clearSolarHover();
+    else pendingSolarHover = { x: event.clientX, y: event.clientY };
+  }
   if (!before || flight || ride) return;
   const next = { ...before, x: event.clientX, y: event.clientY };
   const dx = next.x - before.x, dy = next.y - before.y;
@@ -900,23 +951,24 @@ view.addEventListener('pointerup', event => {
   pointers.delete(event.pointerId);
   if (!point || dragged || flight || ride) return;
   if (!pinning && mode !== 'solar') return;
-  const bounds = view.getBoundingClientRect();
-  const x = (event.clientX - bounds.left) / bounds.width, y = (event.clientY - bounds.top) / bounds.height;
+  const [x, y] = viewPoint(event.clientX, event.clientY);
   if (pinning && globe) placePin(x, y);
   else if (mode === 'solar' && point.mode === 'solar' &&
       Math.hypot(event.clientX - point.x, event.clientY - point.y) < DRAG_THRESHOLD &&
       document.elementFromPoint(event.clientX, event.clientY) === view) {
-    followSolar(solarRenderer.pick(x, y));
+    followSolar(solarRenderer.pick(x, y, { touch: point.type === 'touch' }));
   }
 });
 for (const type of ['pointercancel', 'lostpointercapture']) view.addEventListener(type, event => pointers.delete(event.pointerId));
+for (const type of ['pointerleave', 'pointercancel']) view.addEventListener(type, clearSolarHover);
+window.addEventListener('blur', clearSolarHover);
 
 clock = civilClock('UTC');
 playback.startLive(Date.now(), performance.now());
 updatePlaybackBounds();
 $('clock-context').textContent = 'Simulation time (UTC)';
 if (globe) {
-  solarRenderer = solarView(globe.renderer, globe.surfaces, $('solar-labels'));
+  solarRenderer = solarView(globe.renderer, globe.surfaces, $('solar-labels'), SOLAR_GUIDE_DATA);
   mode = 'solar';
   $('title').textContent = 'Solar System';
 } else noGlobe();

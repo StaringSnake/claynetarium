@@ -8,6 +8,8 @@ To see the sky from Earth, open **Location** and choose **Use my location**, **P
 
 The scene fills the available app viewport without entering browser fullscreen. Use **Time** to set the clock or control playback, and open **Location** to choose or change a site. Once on Earth, use **Travel** to lift off, land on the Moon, or return, and **View** for gesture help, sky settings, and orbit framing. Panels open one at a time on the right on desktop or in a scrollable sheet on phones. Select the same toggle again, choose **Close**, or press Escape to tuck away a panel without resetting the scene. Closing returns keyboard focus to the corresponding toggle.
 
+In the Solar System, hover over an orbit guide to see its world highlighted, or click or tap the guide to follow that world. A visible world takes priority over guides; at a crossing the front guide wins. The body picker is the surest way to select a world in a crowded view. **View → Orbit paths** hides both the guides and their hit targets across the overview and close-ups until you turn them back on or reload.
+
 The simulation clock starts live and is shared by the map and the sky. Choosing a site changes the civil time zone without resetting the simulation; a reload starts a fresh live visit. Location and searches are neither sent by the app nor stored between visits. If you explicitly request location, the browser or OS may use its own location service.
 
 ## Run locally
@@ -51,6 +53,7 @@ Set `CHROME_PATH` to use a nonstandard Chromium executable. Browser tests use on
 
 ## Model and data limits
 
+- Solar System orbit guides show one modeled revolution per world, sampled once from a fixed reference date. Together with the illustrative distance and size scaling, this makes them useful for orientation, not exact tracks for the current date or flight paths.
 - The 22 built-in cities have hand-curated city-center coordinates and IANA zones. Globe pins, manual coordinates, and device coordinates use explicitly labeled UTC; worldwide civil zone lookup is not bundled. City offsets use the browser's `Intl` data, which can be incomplete for historical dates, and future laws can change. A zone change preserves the instant even if its new local date briefly falls outside the supported 1900–2100 edit range.
 - Directions use a sea-level observer and standard refraction; solar events assume a level sea-level horizon and standard limb/refraction conventions. Terrain, elevation, and weather are not modeled, and grazing crossings are particularly sensitive. Illuminated fraction is geocentric, while apparent Moon diameter and center direction are topocentric. Comparisons are sampled, not a range-wide accuracy certification.
 - The hand-curated star table contains 30 rounded J2000 positions and approximate visual magnitudes (individual astronomical facts; see the [SIMBAD object database](https://simbad.cds.unistra.fr/simbad/) for reference). It transforms precession and nutation but omits proper motion and annual aberration. The three constellation stick figures are schematic. Marker brightness is for orientation, not visibility prediction. Globe relief and lunar texture are not simulated.
