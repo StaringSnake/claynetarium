@@ -9,7 +9,6 @@ import { solarDisplayPosition, unpackSolarGuide } from './solar-display.js';
 // Short-axis framing radii in illustrated scene units, not AU.
 export const FULL_SYSTEM = 31;
 export const INNER_SYSTEM = 5.4;
-const TRANSITION_RADIUS = FULL_SYSTEM * 1.12;
 const FOCUS_DURATION = 900;
 const FOV = 53;
 const viewDirection = new T.Vector3(.18, .93, .33).normalize();
@@ -135,14 +134,17 @@ export function solarView(renderer, surfaces, labels, guideData) {
   halo.visible = false;
   const camera = new T.PerspectiveCamera(FOV, 1, .05);
   const target = new T.Vector3();
-  const startOffset = new T.Vector3();
+  const startTarget = new T.Vector3();
+  const startPosition = new T.Vector3();
+  const sidestep = new T.Vector3();
+  const eye = new T.Vector3();
   const direction = new T.Vector3();
   const projection = new T.Vector3();
   const raycaster = new T.Raycaster();
   const pointer = new T.Vector2();
   const pickMeshes = worlds.flatMap(({ group }) => group.children);
   let showGuides = true, hovered = -1, hoveredGuide = false, hoverPoint;
-  let lastWidth, lastHeight, distanceScale, framedRadius = FULL_SYSTEM, framedFocus = 0, transition;
+  let lastWidth, lastHeight, distanceScale, framedRadius = FULL_SYSTEM, transition;
   let framedTheta = SOLAR_ORIENTATION.theta, framedLatitude = SOLAR_ORIENTATION.latitude;
 
   function setHover(body, guide = false) {
@@ -184,13 +186,32 @@ export function solarView(renderer, surfaces, labels, guideData) {
   }
 
   function beginFocus(real) {
-    startOffset.copy(target).sub(worlds[framedFocus].group.position);
+    startTarget.copy(target);
+    startPosition.copy(camera.position);
+    sidestep.set(0, 0, 0);
     transition = {
-      start: real, from: framedFocus, radius: framedRadius, theta: framedTheta, latitude: framedLatitude,
+      start: real, radius: framedRadius, theta: framedTheta, latitude: framedLatitude,
     };
   }
 
   function cancelFocus() { transition = undefined; }
+
+  function clearDestination(destination, focus, distance, travel) {
+    // A user-rotated view can line up with the destination. Bend only the
+    // obstructed part of the glide, sideways rather than widening the frame.
+    const clearance = solarBodyExtent(focus) + 2 * camera.near;
+    const shoulder = Math.min(2 * clearance, startPosition.distanceTo(destination));
+    const gap = eye.copy(target).addScaledVector(direction, distance).distanceTo(destination);
+    if (gap >= shoulder || shoulder <= clearance) return;
+    if (sidestep.lengthSq() === 0) {
+      sidestep.copy(startTarget).sub(destination).cross(direction);
+      if (sidestep.lengthSq() < 1e-8) sidestep.set(Math.cos(framedTheta), 0, -Math.sin(framedTheta));
+      else sidestep.normalize();
+    }
+    const bend = 1 - T.MathUtils.smoothstep(gap, clearance, shoulder);
+    // Endpoints are still exact even if live playback moves the destination.
+    target.addScaledVector(sidestep, clearance * bend * T.MathUtils.smoothstep(travel, 0, .025));
+  }
 
   function draw(positions, { focus, radius, theta, latitude }, width, height, real, { repaint, pendingHover }) {
     // Submit the bodies before decoding or uploading any guide geometry.
@@ -202,20 +223,16 @@ export function solarView(renderer, surfaces, labels, guideData) {
     const destination = worlds[focus].group.position;
     target.copy(destination);
     framedRadius = radius;
-    framedFocus = focus;
     framedTheta = theta;
     framedLatitude = latitude;
+    let travel = 1;
     if (transition) {
       const progress = (real - transition.start) / FOCUS_DURATION;
       if (progress < 1) {
-        // Travel throughout; begin approaching before the retreat is finished.
-        const travel = T.MathUtils.smootherstep(progress, 0, 1);
-        const retreat = T.MathUtils.smoothstep(progress, 0, .6);
-        const approach = T.MathUtils.smoothstep(progress, .25, 1);
-        framedFocus = transition.from;
-        target.copy(worlds[framedFocus].group.position).add(startOffset).lerp(destination, travel);
-        const wide = T.MathUtils.lerp(transition.radius, TRANSITION_RADIUS, retreat);
-        framedRadius = T.MathUtils.lerp(wide, radius, approach);
+        // Move the point of aim and framing together, with no intermediate overview.
+        travel = T.MathUtils.smootherstep(progress, 0, 1);
+        target.copy(startTarget).lerp(destination, travel);
+        framedRadius = T.MathUtils.lerp(transition.radius, radius, travel);
         const turn = T.MathUtils.euclideanModulo(theta - transition.theta + Math.PI, 2 * Math.PI) - Math.PI;
         framedTheta = transition.theta + turn * travel;
         framedLatitude = T.MathUtils.lerp(transition.latitude, latitude, travel);
@@ -224,14 +241,16 @@ export function solarView(renderer, surfaces, labels, guideData) {
     if (width !== lastWidth || height !== lastHeight) {
       camera.aspect = width / height;
       distanceScale = distancePerRadius(camera.aspect);
-      camera.far = TRANSITION_RADIUS * distanceScale + 2 * FULL_SYSTEM;
+      camera.far = FULL_SYSTEM * distanceScale + 2 * FULL_SYSTEM;
       camera.updateProjectionMatrix();
       if (guides) for (const { material } of guides) material.resolution.set(width, height);
       lastWidth = width; lastHeight = height;
     }
     const horizontal = Math.cos(framedLatitude);
     direction.set(Math.sin(framedTheta) * horizontal, Math.sin(framedLatitude), Math.cos(framedTheta) * horizontal);
-    frameCamera(camera, target, framedRadius * distanceScale, direction);
+    const distance = framedRadius * distanceScale;
+    if (transition && travel > 0) clearDestination(destination, focus, distance, travel);
+    frameCamera(camera, target, distance, direction);
     // Revalidate an active hover when the scene is going to repaint. A fresh
     // pointer sample takes precedence; there is still at most one test per draw.
     const point = pendingHover ?? (repaint ? hoverPoint : undefined);

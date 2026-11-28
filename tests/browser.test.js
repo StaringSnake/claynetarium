@@ -533,12 +533,18 @@ for (const phone of [false, true]) test(`3D Solar System framing, shading and zo
   const focused = await solarPixels(page, 2.65 * solarBodyExtent(allSolarBodies.indexOf(body)), [body], body);
   assert.ok(focused[body].diameter > 30 && focused[body].shading > 20, JSON.stringify(focused));
   await captureSolar(page, `${phone ? 'phone' : 'desktop'}-${body.toLowerCase()}-centered`);
+  if (phone) {
+    await solarPicker(page).selectOption('Saturn');
+    const saturn = await solarPixels(page, 2.65 * solarBodyExtent(allSolarBodies.indexOf('Saturn')), ['Saturn'], 'Saturn');
+    assert.ok(saturn.Saturn.diameter > 30 && saturn.Saturn.shading > 20, JSON.stringify(saturn));
+    await captureSolar(page, 'phone-saturn-centered');
+  }
   await button(page, 'Full system')[act]();
   await solarPixels(page, FULL_SYSTEM, ['Sun', 'Pluto']);
   assert.deepEqual(errors, []);
 });
 
-test('normal Solar focus retreats, approaches the latest selection, tracks playback, and restores the overview', async t => {
+test('normal Solar focus glides from the painted view, tracks the latest selection, and restores the overview', async t => {
   const { page, errors } = await opened(t, {
     viewport: { width: 1220, height: 900 }, reducedMotion: 'no-preference',
   }, controlledFrames, false);
@@ -565,7 +571,7 @@ test('normal Solar focus retreats, approaches the latest selection, tracks playb
   await picker.selectOption('Sun');
   await button(page, 'Inner planets').click();
   await step(1);
-  const wide = await diameter('Sun');
+  const inner = await diameter('Sun');
   const hit = await solarPoint(page, INNER_SYSTEM, 'Mars');
   await page.mouse.click(5, hit[1]);
   assert.equal(await picker.inputValue(), 'Sun', 'empty background is not a hit');
@@ -575,11 +581,13 @@ test('normal Solar focus retreats, approaches the latest selection, tracks playb
   await step(0);
   assert.equal(await scene.evaluate(el => getComputedStyle(el).cursor), 'grab',
     'hover does not introduce first-use highlight rendering into an active focus move');
-  await step(190);
-  const retreat = await diameter('Sun');
-  assert.ok(retreat < wide * .4, `Sun shrinks during retreat: ${wide} → ${retreat}`);
+  assert.equal(await diameter('Sun'), inner, 'the first frame retains the inner-system framing');
+  await step(390);
+  const transit = await scene.screenshot();
 
   await picker.selectOption('Jupiter');
+  await step(0);
+  assert.deepEqual(await scene.screenshot(), transit, 'retarget starts from the currently painted scene');
   await page.setViewportSize({ width: 980, height: 760 });
   await waitForSceneLayout(scene);
   await step(760, 2);
@@ -621,7 +629,7 @@ test('normal Solar focus retreats, approaches the latest selection, tracks playb
   }
   await picker.selectOption('Sun');
   await step(900);
-  assert.ok(await diameter('Sun') < retreat * 1.5, 'Sun restores wide overview rather than a Sun close-up');
+  assert.ok(await diameter('Sun') < inner * .4, 'Sun restores wide overview rather than a Sun close-up');
   const afterReturn = Date.parse(await clock(page));
   assert.equal(afterReturn - playbackBefore, 5 * 24 * 3600 * 1000 + 900 * 3600,
     'playback advances at the same rate while returning to the Sun');
@@ -631,7 +639,7 @@ test('normal Solar focus retreats, approaches the latest selection, tracks playb
   await inEarthSky(page);
   assert.equal(Date.parse(await clock(page)), afterReturn);
   assert.equal(await page.getByLabel('Playback speed').inputValue(), '3600');
-  t.diagnostic(`Sun retreat ${wide}→${retreat}px; Jupiter centered ${followed}→${zoomed}px while advancing five days`);
+  t.diagnostic(`Jupiter centered ${followed}→${zoomed}px while advancing five days`);
   assert.deepEqual(errors, []);
 });
 
