@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Frustum, Line3, Matrix4, Vector3, MeshBasicMaterial } from 'three';
 import { DAY, FIRST_DAY, LAST_DAY, civilClock, dateText, offsetText } from '../src/clock.js';
-import { skyAt, solarEvents, solarBodies, solarOrbitGuides, solarSystemAt, spaceAt, EARTH_KM, MOON_KM } from '../src/astronomy.js';
+import { skyAt, solarEvents, solarBodies, solarOrbitGuides, solarSystemAt, solarAxesAt, spaceAt, EARTH_KM, MOON_KM } from '../src/astronomy.js';
 import { solarDisplayPosition, unpackSolarGuide } from '../src/solar-display.js';
 import { solarGuideBuildOptions } from '../scripts/solar-guide-asset.mjs';
 import { solarBodyExtent, solarCamera, solarView, FULL_SYSTEM, INNER_SYSTEM, SOLAR_ORIENTATION } from '../src/solar-view.js';
@@ -10,6 +10,7 @@ import { cities, coordinateSite, findCities } from '../src/places.js';
 import { lunarSites, lunarSkyAt, solarLimbAltitude, nextLunarSolarEvents } from '../src/lunar.js';
 import { earthRows, apolloSun, solarBrackets } from './fixtures/lunar-horizons.js';
 import { solarGuideVertices, solarReference } from './fixtures/solar-horizons.js';
+import { solarRotationReference } from './fixtures/solar-rotation-spice.js';
 
 const day = value => Date.parse(value) / DAY;
 const city = name => cities.find(place => place.name === name);
@@ -17,11 +18,89 @@ const iso = instant => new Date(instant).toISOString();
 const close = (actual, expected, tolerance, name) =>
   assert.ok(Math.abs(actual - expected) <= tolerance, `${name}: ${actual} not within ${tolerance} of ${expected}`);
 
+test('Solar spin follows independent fixed-time SPICE pole and prime-meridian vectors', () => {
+  const angle = (actual, expected) => new Vector3(...actual).angleTo(new Vector3(...expected)) * 180 / Math.PI;
+  const samples = solarRotationReference.map(([utc]) => solarAxesAt(Date.parse(utc)));
+  for (const [j, [utc, reference]] of solarRotationReference.entries()) {
+    const axes = samples[j];
+    for (const [body, north, prime] of reference) {
+      const axis = axes[solarBodies.indexOf(body)];
+      // The offline engine's estimated TT−UT need not match SPICE ET−UTC.
+      // This affects phase most for the fastest rotators; check rates separately.
+      const errors = [angle(axis.north, north), angle(axis.prime, prime)];
+      close(errors[0], 0, .003, `${body} north at ${utc} (degrees)`);
+      close(errors[1], 0, .06, `${body} prime at ${utc} (degrees)`);
+    }
+  }
+  const [before, after] = samples;
+  for (const [i, body] of solarBodies.entries()) {
+    const first = solarRotationReference[0][1][i][2], second = solarRotationReference[1][1][i][2];
+    close(angle(before[i].prime, after[i].prime), angle(first, second), .0001, `${body} rotation across 3 hours (degrees)`);
+  }
+  for (const [body, expected] of [['Mars', 1], ['Venus', -1], ['Uranus', -1], ['Pluto', -1]]) {
+    const i = solarBodies.indexOf(body);
+    const motion = new Vector3(...before[i].prime).cross(new Vector3(...after[i].prime));
+    assert.equal(Math.sign(motion.y), expected, `${body} spin relative to ecliptic north`);
+  }
+});
+
+test('Solar lighting and rendered axes belong to the scene, not the camera', () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ style: {}, classList: { toggle() {} }, offsetWidth: 30 }) };
+  try {
+    let scene;
+    const renderer = { render(value) { scene = value; scene.updateMatrixWorld(); } };
+    const view = solarView(renderer, { earth: new MeshBasicMaterial(), request() {} }, { append() {} }, []);
+    view.setGuides(false);
+    const samples = solarRotationReference.map(([utc]) => {
+      const instant = Date.parse(utc);
+      return { positions: solarSystemAt(instant), axes: solarAxesAt(instant) };
+    });
+    const draw = (sample, theta = .8) => view.draw(sample,
+      { focus: 6, radius: 4.5, theta, latitude: .4 }, 1220, 900, 0, { repaint: true });
+    draw(samples[0]);
+    const lights = scene.children.filter(child => child.isLight);
+    assert.deepEqual(lights.map(light => light.type), ['PointLight', 'AmbientLight']);
+    const [sunlight, ambient] = lights;
+    assert.equal(sunlight.distance, 0);
+    assert.equal(sunlight.decay, 0);
+    assert.equal(sunlight.castShadow, false);
+    assert.ok(ambient.intensity > 0 && ambient.intensity < sunlight.intensity / 8);
+    const groups = scene.children.filter(child => child.isGroup);
+    assert.deepEqual(sunlight.position.toArray(), groups[0].position.toArray());
+    assert.equal(groups[0].children[0].material.type, 'MeshBasicMaterial', 'Sun does not shade itself');
+    const rendered = () => groups.map(group => group.quaternion.toArray());
+    const initial = rendered();
+    draw(samples[0], -2);
+    assert.deepEqual(rendered(), initial);
+    draw(samples[1]);
+    const rings = groups[6].children.slice(1);
+    assert.equal(rings.length, 2);
+    for (const [i, group] of groups.entries()) {
+      const [body, expectedNorth, expectedPrime] = solarRotationReference[1][1][i];
+      for (const [vector, reference] of [[new Vector3(0, 1, 0), expectedNorth], [new Vector3(1, 0, 0), expectedPrime]]) {
+        close(vector.applyQuaternion(group.quaternion).distanceTo(new Vector3(...reference)), 0, .0011, body);
+      }
+    }
+    for (const ring of rings) {
+      assert.equal(ring.material.type, 'MeshLambertMaterial');
+      const normal = new Vector3(0, 0, 1).transformDirection(ring.matrixWorld);
+      const saturnNorth = new Vector3(...samples[1].axes[6].north);
+      close(normal.dot(saturnNorth), 1, 1e-9, 'Saturn ring shares the planet’s equator');
+    }
+    draw(samples[0]);
+    assert.deepEqual(rendered(), initial, 'revisiting the fixed instant restores all axes');
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
 test('Solar focus glides directly, adjusts framing without overshoot and retargets from the painted pose', t => {
   const originalDocument = globalThis.document;
   globalThis.document = { createElement: () => ({ style: {}, classList: { toggle() {} }, offsetWidth: 30 }) };
   try {
-    const positions = solarSystemAt(Date.parse(solarReference[0][0]));
+    const instant = Date.parse(solarReference[0][0]);
+    const positions = solarSystemAt(instant), axes = solarAxesAt(instant);
     for (const [width, height] of [[1220, 900], [390, 664]]) {
       let frame, renderedScene, renderedCamera;
       const renderer = { render(scene, camera) {
@@ -37,7 +116,7 @@ test('Solar focus glides directly, adjusts framing without overshoot and retarge
       const state = (focus, orientation = SOLAR_ORIENTATION) => ({ focus, radius: radius(focus), ...orientation });
       const point = (focus, worlds = positions) => new Vector3(...solarDisplayPosition(worlds[focus]));
       const paint = (time, selection, worlds = positions) => {
-        view.draw(worlds, selection, width, height, time, { repaint: true });
+        view.draw({ positions: worlds, axes }, selection, width, height, time, { repaint: true });
         return frame;
       };
       for (const [from, to, startRadius] of [[jupiter, pluto, 1.7], [pluto, saturn, .6]]) {

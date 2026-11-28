@@ -5,6 +5,8 @@ import { after, before, test } from 'node:test';
 import { chromium, devices } from 'playwright-core';
 import { Vector3 } from 'three';
 import { solarGuideVertices, solarReference } from './fixtures/solar-horizons.js';
+import { solarRotationReference } from './fixtures/solar-rotation-spice.js';
+import { DAY } from '../src/clock.js';
 import { solarDisplayPosition } from '../src/solar-display.js';
 import { FULL_SYSTEM, INNER_SYSTEM, solarBodyExtent, solarCamera } from '../src/solar-view.js';
 
@@ -160,8 +162,8 @@ async function solarPoint(page, radius, body) {
   return [x + width * (1 + point.x) / 2, y + height * (1 - point.y) / 2];
 }
 
-async function samplePathPixels(scene, points) {
-  const image = await scene.screenshot({ scale: 'css' });
+async function sampleSolarPixels(scene, points, path) {
+  const image = await scene.screenshot({ scale: 'css', path });
   return scene.evaluate(async (_, { png, points }) => {
     const image = new Image(); image.src = `data:image/png;base64,${png}`; await image.decode();
     const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
@@ -169,11 +171,18 @@ async function samplePathPixels(scene, points) {
     ctx.drawImage(image, 0, 0);
     return points.map(([x, y]) => {
       const data = ctx.getImageData(Math.round(x) - 2, Math.round(y) - 2, 5, 5).data;
-      let maxGreen = 0;
-      for (let i = 1; i < data.length; i += 4) maxGreen = Math.max(maxGreen, data[i]);
-      return maxGreen;
+      let maxGreen = 0, sum = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        maxGreen = Math.max(maxGreen, data[i + 1]);
+        sum += data[i] + data[i + 1] + data[i + 2];
+      }
+      return { maxGreen, brightness: sum / (data.length * 3 / 4) };
     });
   }, { png: image.toString('base64'), points });
+}
+
+async function samplePathPixels(scene, points) {
+  return (await sampleSolarPixels(scene, points)).map(pixel => pixel.maxGreen);
 }
 
 // Check rendered pixels at the projections of independently sampled heliocentric coordinates.
@@ -205,13 +214,11 @@ async function solarPixels(page, radius, names, focus = 'Sun') {
       let left = width, right = width;
       while (left > 0 && value(left - 1) > background + 30) left--;
       while (right + 1 < width * 2 && value(right + 1) > background + 30) right++;
-      const quarter = Math.floor((right - left) / 4);
-      const interior = [value(left + quarter), value(width), value(right - quarter)];
-      return [body, center - background, right - left + 1, Math.max(...interior) - Math.min(...interior)];
+      return [body, center - background, right - left + 1];
     });
   }, { png: image.toString('base64'), checks });
   for (const [body, contrast] of results) assert.ok(contrast > 30, `${body} has visible pixels: ${JSON.stringify(results)}`);
-  return Object.fromEntries(results.map(([body, , diameter, shading]) => [body, { diameter, shading }]));
+  return Object.fromEntries(results.map(([body, , diameter]) => [body, { diameter }]));
 }
 const allSolarBodies = ['Sun', ...solarReference[0][1].map(([body]) => body)];
 
@@ -314,6 +321,153 @@ test('solar render work is bounded and paused clock edits repaint without waitin
   await button(page, 'Explore').click();
   await button(page, 'Inner planets').click();
   assert.ok(await draws(1, 1) > 0, 'zoom repaints without another time change');
+  assert.deepEqual(errors, []);
+});
+
+test('all four fast presets move the shared clock by fixed durations and preserve Pause, scrub, views and Now', async t => {
+  const { page, errors } = await opened(t, { viewport: { width: 940, height: 760 }, reducedMotion: 'reduce' }, controlledFrames, false);
+  const step = (ms = 0) => page.evaluate(ms => window.stepFrames(1, ms), ms);
+  const timePanel = () => openPanel(page, 'Time');
+  await step();
+  await solarPicker(page).selectOption('Mars');
+  await step();
+  await openPanel(page, 'View');
+  await button(page, 'Orbit paths').click();
+  await button(page, 'Close View').click();
+  await timePanel();
+  await button(page, 'Pause').click();
+  await button(page, 'Close Time').click();
+  await step();
+  const scene = region(page);
+  const initial = await scene.screenshot();
+  await timePanel();
+  await page.getByLabel('Enter local time').fill('15:00:00');
+  await button(page, 'Close Time').click();
+  await step();
+  assert.ok(!(await scene.screenshot()).equals(initial), 'scrubbing changes the rendered world');
+  await timePanel();
+  await page.getByLabel('Enter local time').fill('12:00:00');
+  await button(page, 'Close Time').click();
+  await step();
+  assert.ok((await scene.screenshot()).equals(initial), 'returning to the instant restores the identical world');
+
+  await timePanel();
+  const speed = page.getByRole('combobox', { name: 'Playback speed' });
+  await button(page, 'Play').click();
+  let instant = Date.parse(fixed);
+  for (const days of [1, 7, 30, 365]) {
+    await speed.selectOption(String(days * 86400));
+    await step();
+    assert.equal(Date.parse(await clock(page)), instant, 'changing rates does not move the anchor');
+    await step(1000);
+    assert.equal(Date.parse(await clock(page)), instant += days * DAY);
+  }
+  await button(page, 'Close Time').click();
+  const fastFrame = await scene.screenshot();
+  assert.ok(!fastFrame.equals(initial));
+  await timePanel();
+  await button(page, 'Pause').click();
+  await step(1000);
+  assert.equal(Date.parse(await clock(page)), instant);
+  const date = page.getByLabel('Enter local date');
+  await date.fill('2024-04-08');
+  await step();
+  await date.fill(new Date(instant).toISOString().slice(0, 10));
+  await button(page, 'Close Time').click();
+  await step();
+  assert.ok((await scene.screenshot()).equals(fastFrame), 'fast playback renders the same position and axes as scrubbing to that instant');
+  await earthEntry(page, 'Try demo sky');
+  await step();
+  assert.equal(Date.parse(await clock(page)), instant, 'entering Earth preserves the shared instant');
+  await timePanel();
+  assert.equal(await speed.inputValue(), '31536000');
+  await page.evaluate(() => window.setWallTime('2026-11-28T14:00:00Z'));
+  await button(page, 'Now').click();
+  await step();
+  assert.equal(await speed.inputValue(), '1');
+  assert.equal(await clock(page), '2026-11-28T14:00:00.000Z');
+  assert.deepEqual(errors, []);
+});
+
+test('fixed-time Solar pixels follow the Sun as the camera orbits Mars and Pluto; Saturn rings and Sun remain readable', async t => {
+  const { page, errors } = await opened(t, { viewport: { width: 1220, height: 900 }, reducedMotion: 'reduce' }, controlledFrames, false);
+  const step = () => page.evaluate(() => window.stepFrames(1, 0));
+  await step();
+  await openPanel(page, 'View');
+  await button(page, 'Orbit paths').click();
+  await button(page, 'Close View').click();
+  if (await button(page, 'Explore').isVisible()) await button(page, 'Explore').click();
+  const scene = region(page), pick = solarPicker(page);
+  const { width, height } = await scene.boundingBox();
+  let theta = Math.atan2(.18, .33), latitude = Math.asin(.93 / Math.hypot(.18, .93, .33));
+  const turn = async (horizontal, vertical) => {
+    for (const [steps, counter, increment] of [[horizontal, 'ArrowRight', 'ArrowLeft'], [vertical, 'ArrowDown', 'ArrowUp']]) {
+      for (let i = 0; i < Math.abs(steps); i++) await scene.press(steps < 0 ? counter : increment);
+    }
+    theta -= horizontal * .196;
+    latitude += vertical * .196;
+  };
+  const pixels = async (body, normals, tag) => {
+    const center = solarPoints.get(body);
+    const extent = solarBodyExtent(allSolarBodies.indexOf(body));
+    const camera = solarCamera(width, height, 2.65 * extent, center);
+    const distance = camera.position.distanceTo(center);
+    const eye = new Vector3(Math.sin(theta) * Math.cos(latitude), Math.sin(latitude), Math.cos(theta) * Math.cos(latitude));
+    camera.position.copy(center).addScaledVector(eye, distance);
+    camera.lookAt(center);
+    camera.updateMatrixWorld();
+    const points = normals(eye, center.clone().negate().normalize()).map(offset => {
+      const { x, y } = offset.multiplyScalar(extent).add(center).project(camera);
+      return [(1 + x) * width / 2, (1 - y) * height / 2];
+    });
+    await step();
+    const path = process.env.SOLAR_SCREENSHOTS ? `${process.env.SOLAR_SCREENSHOTS}/lighting-${tag}.png` : undefined;
+    return (await sampleSolarPixels(scene, points, path)).map(pixel => Math.round(pixel.brightness));
+  };
+  const surfaces = (eye, sun) => {
+    const side = sun.addScaledVector(eye, -sun.dot(eye)).normalize().multiplyScalar(.72);
+    const forward = eye.multiplyScalar(Math.sqrt(1 - .72 ** 2));
+    return [forward.clone().add(side), forward.clone().sub(side)];
+  };
+  for (const body of ['Mars', 'Pluto']) {
+    await pick.selectOption(body);
+    const center = solarPoints.get(body), sunAngle = Math.atan2(-center.x, -center.z);
+    for (const side of [-1, 1]) {
+      const target = sunAngle + side * Math.PI * .45;
+      const turnTo = Math.atan2(Math.sin(theta - target), Math.cos(theta - target));
+      await turn(Math.round(turnTo / .196), Math.round((.3 - latitude) / .196));
+      const [day, night] = await pixels(body, surfaces, `${body}-${side}`);
+      assert.ok(day > night + 35 && night > 30, `${body}, side ${side}: day=${day}, night=${night}`);
+      t.diagnostic(`${body}, camera side ${side}: day ${day}, night ${night} (average RGB)`);
+    }
+  }
+  await pick.selectOption('Saturn');
+  const north = new Vector3(...solarRotationReference[0][1][6][1]);
+  // Compare the two faces of the double-sided ring, sampling its outer band
+  // on the projected major axis so the sphere can't occlude the probes.
+  const ring = eye => {
+    const edge = north.clone().cross(eye).normalize().multiplyScalar(1.8 / 1.9);
+    return [edge, edge.clone().negate()];
+  };
+  await turn(0, Math.round((1.1 - latitude) / .196));
+  const northFace = await pixels('Saturn', ring, 'Saturn-north');
+  await turn(0, Math.round((-1.1 - latitude) / .196));
+  const southFace = await pixels('Saturn', ring, 'Saturn-south');
+  const sunOnNorth = north.dot(solarPoints.get('Saturn').clone().negate()) > 0;
+  const [lit, unlit] = sunOnNorth ? [northFace, southFace] : [southFace, northFace];
+  assert.ok(Math.min(...lit) > Math.max(...unlit) + 12 && Math.min(...unlit) > 35,
+    `Saturn ring: north=${northFace}, south=${southFace}`);
+  t.diagnostic(`Saturn ring: sunward face ${lit}, opposite face ${unlit} (average RGB)`);
+
+  await pick.selectOption('Sun');
+  await step();
+  await button(page, 'Inner planets').click();
+  await step();
+  const [x, y] = await solarPoint(page, INNER_SYSTEM, 'Sun');
+  const box = await scene.boundingBox();
+  const [{ brightness }] = await sampleSolarPixels(scene, [[x - box.x, y - box.y]]);
+  assert.ok(brightness > 155, `Sun is luminous: ${brightness}`);
+  assert.equal(await clock(page), fixed, 'camera input never changes the simulation instant');
   assert.deepEqual(errors, []);
 });
 
@@ -492,7 +646,7 @@ for (const phone of [false, true]) test(`orbit guides render and can be picked o
   assert.deepEqual(errors, []);
 });
 
-for (const phone of [false, true]) test(`3D Solar System framing, shading and zoom on ${phone ? 'phone' : 'desktop'}`, async t => {
+for (const phone of [false, true]) test(`3D Solar System framing and zoom on ${phone ? 'phone' : 'desktop'}`, async t => {
   const { page, errors } = await opened(t, phone ?
     { ...devices['iPhone 13'], viewport: { width: 390, height: 664 }, reducedMotion: 'reduce' } :
     { viewport: { width: 1220, height: 900 }, reducedMotion: 'reduce' }, phone ? watchOrbitBake : undefined);
@@ -531,12 +685,12 @@ for (const phone of [false, true]) test(`3D Solar System framing, shading and zo
   const body = phone ? 'Pluto' : 'Saturn';
   await solarPicker(page).selectOption(body);
   const focused = await solarPixels(page, 2.65 * solarBodyExtent(allSolarBodies.indexOf(body)), [body], body);
-  assert.ok(focused[body].diameter > 30 && focused[body].shading > 20, JSON.stringify(focused));
+  assert.ok(focused[body].diameter > 30, JSON.stringify(focused));
   await captureSolar(page, `${phone ? 'phone' : 'desktop'}-${body.toLowerCase()}-centered`);
   if (phone) {
     await solarPicker(page).selectOption('Saturn');
     const saturn = await solarPixels(page, 2.65 * solarBodyExtent(allSolarBodies.indexOf('Saturn')), ['Saturn'], 'Saturn');
-    assert.ok(saturn.Saturn.diameter > 30 && saturn.Saturn.shading > 20, JSON.stringify(saturn));
+    assert.ok(saturn.Saturn.diameter > 30, JSON.stringify(saturn));
     await captureSolar(page, 'phone-saturn-centered');
   }
   await button(page, 'Full system')[act]();

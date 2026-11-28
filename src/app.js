@@ -1,4 +1,4 @@
-import { skyAt, solarEvents, solarBodies, solarSystemAt, spaceAt, EARTH_KM, RAD } from './astronomy.js';
+import { skyAt, solarEvents, solarBodies, solarSystemAt, solarAxesAt, spaceAt, EARTH_KM, RAD } from './astronomy.js';
 import { civilClock, dateText, timeText, offsetText, SECOND, DAY, FIRST_DAY, LAST_DAY } from './clock.js';
 import { cities, coordinateSite, demo, findCities } from './places.js';
 import { globeView } from './globe-view.js';
@@ -30,7 +30,7 @@ const solarBody = $('solar-body'), welcome = $('solar-welcome'), explore = $('ex
 const solarPaths = $('solar-paths');
 let showSolarPaths = true, pendingSolarHover;
 let welcomeDismissed = false;
-let solarPositions, solarInstant, solarSampleTime;
+let solarSample, solarInstant, solarSampleTime;
 const orbit = { theta: 0, latitude: 0, distance: 4.3, focus: 'earth', overview: false };
 const options = { glare: 1, labels: true, lines: true };
 const playback = createPlayback();
@@ -215,11 +215,12 @@ function updateSpace(real = performance.now()) {
 
 function updateSolar(real) {
   const { instant, playing } = playback;
-  // At live speed sub-second orbital motion is far below a pixel, even at maximum zoom.
+  // At 1×, sub-second motion is below a pixel. At faster rates, sample
+  // positions and axes together without stepping through skipped instants.
   if (solarInstant === instant || (playing && playback.rate === 1 &&
       Math.floor(solarInstant / SECOND) === Math.floor(instant / SECOND))) return false;
   if (playing && solarInstant !== undefined && real - solarSampleTime < SPACE_SAMPLE_INTERVAL) return false;
-  solarPositions = solarSystemAt(instant);
+  solarSample = { positions: solarSystemAt(instant), axes: solarAxesAt(instant) };
   solarInstant = instant;
   solarSampleTime = real;
   return true;
@@ -554,7 +555,7 @@ function draw(real) {
         else clearSolarHover();
         pendingSolarHover = undefined;
       }
-      const hovering = solarRenderer.draw(solarPositions, solar, width, height, real,
+      const hovering = solarRenderer.draw(solarSample, solar, width, height, real,
         { repaint: repaint || dirty, pendingHover });
       view.classList.toggle('path-hover', hovering);
     }

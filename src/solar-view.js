@@ -15,7 +15,6 @@ const viewDirection = new T.Vector3(.18, .93, .33).normalize();
 export const SOLAR_ORIENTATION = Object.freeze({
   theta: Math.atan2(viewDirection.x, viewDirection.z), latitude: Math.asin(viewDirection.y),
 });
-const paintedTilt = -.85; // Show the illustrative surface bands and ring opening, not their poles.
 const guideColor = '#50667d', hoverColor = '#9fe7d6';
 const guideWidth = 1.5; // CSS pixels, regardless of DPR or distance.
 const appearances = [
@@ -87,25 +86,24 @@ function paintedSurface({ colors, bands }, index) {
 export function solarView(renderer, surfaces, labels, guideData) {
   const scene = new T.Scene();
   scene.background = new T.Color('#070d17');
-  const sunlight = new T.PointLight(0xfff1da, 2.6, 0, 0);
-  const fill = new T.DirectionalLight(0xe2efff, .82);
-  fill.position.copy(viewDirection);
-  scene.add(sunlight, fill, new T.AmbientLight(0xbbcde8, .32));
+  // Infinite range and zero decay: light comes from the Sun, but the
+  // illustrated distances don't stand in for physical irradiance.
+  const sunlight = new T.PointLight(0xfff1da, 2.8, 0, 0);
+  scene.add(sunlight, new T.AmbientLight(0xd4dff0, .23));
   const sphere = new T.SphereGeometry(1, 32, 20);
   const worlds = solarBodies.map((body, index) => {
     const appearance = appearances[index];
-    const material = body === 'Earth' ? surfaces.earth :
-      new T.MeshLambertMaterial({ map: paintedSurface(appearance, index),
-        emissive: index === 0 ? '#d07822' : 0 });
+    const material = body === 'Earth' ? surfaces.earth : index === 0 ?
+      new T.MeshBasicMaterial({ map: paintedSurface(appearance, index) }) :
+      new T.MeshLambertMaterial({ map: paintedSurface(appearance, index) });
     const group = new T.Group();
     const globe = new T.Mesh(sphere, material);
-    globe.rotation.x = paintedTilt;
     group.add(globe);
     if (appearance.ring) {
       for (const [inner, outer, color] of [[1.24, 1.62, '#c7a279'], [1.68, appearance.ring, '#f0dabb']]) {
         const ring = new T.Mesh(new T.RingGeometry(inner, outer, 64),
           new T.MeshLambertMaterial({ color, side: T.DoubleSide }));
-        ring.rotation.x = paintedTilt - Math.PI / 2;
+        ring.rotation.x = -Math.PI / 2; // Equatorial plane; the annulus is symmetric about the spin axis.
         group.add(ring);
       }
     }
@@ -140,12 +138,15 @@ export function solarView(renderer, surfaces, labels, guideData) {
   const eye = new T.Vector3();
   const direction = new T.Vector3();
   const projection = new T.Vector3();
+  const north = new T.Vector3(), prime = new T.Vector3(), localZ = new T.Vector3();
+  const basis = new T.Matrix4();
   const raycaster = new T.Raycaster();
   const pointer = new T.Vector2();
   const pickMeshes = worlds.flatMap(({ group }) => group.children);
   let showGuides = true, hovered = -1, hoveredGuide = false, hoverPoint;
   let lastWidth, lastHeight, distanceScale, framedRadius = FULL_SYSTEM, transition;
   let framedTheta = SOLAR_ORIENTATION.theta, framedLatitude = SOLAR_ORIENTATION.latitude;
+  let paintedSample;
 
   function setHover(body, guide = false) {
     if (body === hovered && guide === hoveredGuide) return false;
@@ -213,12 +214,18 @@ export function solarView(renderer, surfaces, labels, guideData) {
     target.addScaledVector(sidestep, clearance * bend * T.MathUtils.smoothstep(travel, 0, .025));
   }
 
-  function draw(positions, { focus, radius, theta, latitude }, width, height, real, { repaint, pendingHover }) {
+  function draw(sample, { focus, radius, theta, latitude }, width, height, real, { repaint, pendingHover }) {
     // Submit the bodies before decoding or uploading any guide geometry.
     if (painted && showGuides && !guides) prepareGuides(width, height);
     if (focus === solarBodies.indexOf('Earth')) surfaces.request(false);
-    for (const [index, world] of worlds.entries()) {
-      world.group.position.fromArray(solarDisplayPosition(positions[index]));
+    if (sample !== paintedSample) {
+      for (const [index, { group }] of worlds.entries()) {
+        group.position.fromArray(solarDisplayPosition(sample.positions[index]));
+        north.fromArray(sample.axes[index].north);
+        prime.fromArray(sample.axes[index].prime);
+        group.quaternion.setFromRotationMatrix(basis.makeBasis(prime, north, localZ.crossVectors(prime, north)));
+      }
+      paintedSample = sample;
     }
     const destination = worlds[focus].group.position;
     target.copy(destination);
