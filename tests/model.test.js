@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Frustum, Line3, Matrix4, Vector3 } from 'three';
+import { Frustum, Line3, Matrix4, Vector3, MeshBasicMaterial } from 'three';
 import { DAY, FIRST_DAY, LAST_DAY, civilClock, dateText, offsetText } from '../src/clock.js';
 import { skyAt, solarEvents, solarBodies, solarOrbitGuides, solarSystemAt, spaceAt, EARTH_KM, MOON_KM } from '../src/astronomy.js';
 import { solarDisplayPosition, unpackSolarGuide } from '../src/solar-display.js';
 import { solarGuideBuildOptions } from '../scripts/solar-guide-asset.mjs';
-import { solarBodyExtent, solarCamera, FULL_SYSTEM, INNER_SYSTEM } from '../src/solar-view.js';
+import { solarBodyExtent, solarCamera, solarView, FULL_SYSTEM, INNER_SYSTEM, SOLAR_ORIENTATION } from '../src/solar-view.js';
 import { cities, coordinateSite, findCities } from '../src/places.js';
 import { lunarSites, lunarSkyAt, solarLimbAltitude, nextLunarSolarEvents } from '../src/lunar.js';
 import { earthRows, apolloSun, solarBrackets } from './fixtures/lunar-horizons.js';
@@ -16,6 +16,129 @@ const city = name => cities.find(place => place.name === name);
 const iso = instant => new Date(instant).toISOString();
 const close = (actual, expected, tolerance, name) =>
   assert.ok(Math.abs(actual - expected) <= tolerance, `${name}: ${actual} not within ${tolerance} of ${expected}`);
+
+test('Solar focus glides directly, adjusts framing without overshoot and retargets from the painted pose', t => {
+  const originalDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ style: {}, classList: { toggle() {} }, offsetWidth: 30 }) };
+  try {
+    const positions = solarSystemAt(Date.parse(solarReference[0][0]));
+    for (const [width, height] of [[1220, 900], [390, 664]]) {
+      let frame, renderedScene, renderedCamera;
+      const renderer = { render(scene, camera) {
+        renderedScene = scene;
+        renderedCamera = camera;
+        frame = { position: camera.position.clone(), rotation: camera.quaternion.clone() };
+      } };
+      const view = solarView(renderer, { earth: new MeshBasicMaterial(), request() {} }, { append() {} }, []);
+      view.setGuides(false);
+      const jupiter = solarBodies.indexOf('Jupiter'), pluto = solarBodies.indexOf('Pluto');
+      const saturn = solarBodies.indexOf('Saturn'), mars = solarBodies.indexOf('Mars');
+      const radius = focus => focus ? 2.65 * solarBodyExtent(focus) : FULL_SYSTEM;
+      const state = (focus, orientation = SOLAR_ORIENTATION) => ({ focus, radius: radius(focus), ...orientation });
+      const point = (focus, worlds = positions) => new Vector3(...solarDisplayPosition(worlds[focus]));
+      const paint = (time, selection, worlds = positions) => {
+        view.draw(worlds, selection, width, height, time, { repaint: true });
+        return frame;
+      };
+      for (const [from, to, startRadius] of [[jupiter, pluto, 1.7], [pluto, saturn, .6]]) {
+        const initial = paint(0, { ...state(from), radius: startRadius });
+        const expected = solarCamera(width, height, radius(to), point(to));
+        const direction = new Vector3(0, 0, 1).applyQuaternion(initial.rotation);
+        const separation = point(to).sub(point(from));
+        const across = separation.clone().addScaledVector(direction, -separation.dot(direction));
+        const initialDepth = initial.position.clone().sub(point(from)).dot(direction);
+        const finalDepth = expected.position.clone().sub(point(to)).dot(direction);
+        const depthSign = Math.sign(finalDepth - initialDepth);
+        view.beginFocus(0);
+        const samples = Array.from({ length: 901 }, (_, time) => paint(time, state(to)));
+        close(samples[0].position.distanceTo(initial.position), 0, 1e-9, 'starts from current position and zoom');
+        let lastTravel = 0, lastDepth = initialDepth;
+        for (const sample of samples) {
+          const travel = sample.position.clone().sub(initial.position).dot(across) / across.lengthSq();
+          const aim = point(from).addScaledVector(separation, travel);
+          const depth = sample.position.clone().sub(aim).dot(direction);
+          assert.ok(travel >= lastTravel - 1e-9 && travel <= 1 + 1e-9, 'no travel reversal or overshoot');
+          assert.ok(depthSign * (depth - lastDepth) >= -1e-9 && depthSign * (finalDepth - depth) >= -1e-9,
+            `framing only changes toward its destination: ${lastDepth} → ${depth}, end ${finalDepth}`);
+          close(1 - Math.abs(sample.rotation.dot(initial.rotation)), 0, 1e-9, 'no turn between planets');
+          lastTravel = travel;
+          lastDepth = depth;
+        }
+        for (const time of [240, 500]) {
+          const prior = samples[time].position.clone().sub(samples[time - 1].position);
+          const next = samples[time + 1].position.clone().sub(samples[time].position);
+          assert.ok(Math.min(prior.length(), next.length()) > .01, `no pause at ${time} ms`);
+          assert.ok(prior.distanceTo(next) < .002, `velocity stays continuous at ${time} ms`);
+        }
+        assert.equal(view.animating, false);
+        close(frame.position.distanceTo(expected.position), 0, 1e-9, 'same end pose as direct framing');
+        // Bound all of the silhouette by its outer sphere, including Saturn's rings.
+        const extent = solarBodyExtent(to);
+        const screenFraction = Math.tan(Math.asin(extent / finalDepth)) / (Math.tan(expected.fov * Math.PI / 360) *
+          Math.min(1, width / height));
+        assert.ok(screenFraction > .3 && screenFraction < .5, `full extent with margin: ${screenFraction}`);
+        if (to === saturn) {
+          renderedScene.updateMatrixWorld();
+          let ringBounds = 0, ringCount = 0;
+          renderedScene.traverse(mesh => {
+            if (mesh.geometry?.type !== 'RingGeometry') return;
+            ringCount++;
+            const vertices = mesh.geometry.attributes.position;
+            for (let i = 0; i < vertices.count; i++) {
+              const { x, y, z } = new Vector3().fromBufferAttribute(vertices, i)
+                .applyMatrix4(mesh.matrixWorld).project(renderedCamera);
+              assert.ok(Math.abs(z) < 1, 'ring vertices lie within the near and far planes');
+              ringBounds = Math.max(ringBounds, Math.abs(x), Math.abs(y));
+            }
+          });
+          assert.equal(ringCount, 2);
+          assert.ok(ringBounds > .2 && ringBounds < .5, `both rendered rings fit with margin: ${ringBounds}`);
+        }
+        t.diagnostic(`${width}×${height} ${solarBodies[from]}→${solarBodies[to]}: depth ${initialDepth.toFixed(2)}→${finalDepth.toFixed(2)}, extent ${(screenFraction * 100).toFixed(1)}% of short axis`);
+      }
+
+      const towardJupiter = point(jupiter).sub(point(mars)).normalize();
+      const approach = { theta: Math.atan2(towardJupiter.x, towardJupiter.z), latitude: Math.asin(towardJupiter.y) };
+      paint(0, state(mars, approach));
+      view.beginFocus(0);
+      let closest = Infinity;
+      for (let time = 0; time <= 900; time++) {
+        const sample = paint(time, state(jupiter, approach));
+        closest = Math.min(closest, sample.position.distanceTo(point(jupiter)));
+      }
+      assert.ok(closest > solarBodyExtent(jupiter) + .05, `aligned glide clears the planet and near plane: ${closest}`);
+      t.diagnostic(`${width}×${height} aligned Mars→Jupiter: closest pass ${closest.toFixed(2)} units`);
+
+      const angled = { theta: 1.4, latitude: .22 };
+      paint(1000, state(jupiter, angled));
+      view.beginFocus(1000);
+      const interrupted = paint(1390, state(pluto, angled));
+      view.beginFocus(1390);
+      const later = solarSystemAt(Date.parse(solarReference[0][0]) + DAY);
+      const restart = paint(1390, state(0), later); // Retarget from the paint, not a newly moved origin body.
+      close(restart.position.distanceTo(interrupted.position), 0, 1e-9, 'retarget position');
+      close(1 - Math.abs(restart.rotation.dot(interrupted.rotation)), 0, 1e-9, 'retarget orientation');
+      const next = paint(1406, state(0));
+      assert.ok(next.position.distanceTo(interrupted.position) < .3, 'first restarted frame stays near the painted pose');
+      const end = paint(2290, state(0));
+      const overview = solarCamera(width, height, FULL_SYSTEM, point(0));
+      close(end.position.distanceTo(overview.position), 0, 1e-9, 'Sun ends at the overview');
+      close(1 - Math.abs(end.rotation.dot(overview.quaternion)), 0, 1e-9, 'Sun restores the overview orientation');
+
+      view.beginFocus(2300);
+      const moving = paint(2550, state(pluto), later);
+      const staticTarget = paint(2550, state(pluto));
+      assert.ok(moving.position.distanceTo(staticTarget.position) > 1e-4, 'in-flight destination tracks the live body');
+      view.cancelFocus(); // Same path used when reduced motion is enabled in flight.
+      const reduced = paint(2550, state(pluto));
+      const expected = solarCamera(width, height, radius(pluto), point(pluto));
+      close(reduced.position.distanceTo(expected.position), 0, 1e-9, 'cancel immediately reaches the same destination');
+    }
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
 
 test('heliocentric ecliptic vectors agree with independent Horizons samples, including Pluto depth', () => {
   for (const [date, rows] of solarReference) {

@@ -9,7 +9,7 @@ import { solarDisplayPosition, unpackSolarGuide } from './solar-display.js';
 // Short-axis framing radii in illustrated scene units, not AU.
 export const FULL_SYSTEM = 31;
 export const INNER_SYSTEM = 5.4;
-const TRANSITION_RADIUS = FULL_SYSTEM * 1.12;
+const FOCUS_DURATION = 900;
 const FOV = 53;
 const viewDirection = new T.Vector3(.18, .93, .33).normalize();
 export const SOLAR_ORIENTATION = Object.freeze({
@@ -134,28 +134,35 @@ export function solarView(renderer, surfaces, labels, guideData) {
   halo.visible = false;
   const camera = new T.PerspectiveCamera(FOV, 1, .05);
   const target = new T.Vector3();
-  const startOffset = new T.Vector3();
+  const startTarget = new T.Vector3();
+  const startPosition = new T.Vector3();
+  const sidestep = new T.Vector3();
+  const eye = new T.Vector3();
   const direction = new T.Vector3();
   const projection = new T.Vector3();
   const raycaster = new T.Raycaster();
   const pointer = new T.Vector2();
   const pickMeshes = worlds.flatMap(({ group }) => group.children);
-  let showGuides = true, hovered = -1, hoverPoint;
-  let lastWidth, lastHeight, distanceScale, framedRadius = FULL_SYSTEM, framedFocus = 0, transition;
+  let showGuides = true, hovered = -1, hoveredGuide = false, hoverPoint;
+  let lastWidth, lastHeight, distanceScale, framedRadius = FULL_SYSTEM, transition;
+  let framedTheta = SOLAR_ORIENTATION.theta, framedLatitude = SOLAR_ORIENTATION.latitude;
 
-  function setHover(body) {
-    if (body === hovered) return false;
-    if (hovered > 0) {
+  function setHover(body, guide = false) {
+    if (body === hovered && guide === hoveredGuide) return false;
+    if (hoveredGuide) {
       guides[hovered - 1].material.color.set(guideColor);
       guides[hovered - 1].renderOrder = 1;
-      worlds[hovered].label.classList.remove('path-hover', 'path-key');
     }
+    if (hovered >= 0) worlds[hovered].label.classList.remove('path-hover', 'path-key');
     hovered = body;
-    halo.visible = hovered > 0;
-    if (hovered > 0) {
-      worlds[hovered].group.add(halo);
+    hoveredGuide = guide;
+    if (hoveredGuide) {
       guides[hovered - 1].material.color.set(hoverColor);
       guides[hovered - 1].renderOrder = 2;
+    }
+    halo.visible = hovered >= 0;
+    if (halo.visible) {
+      worlds[hovered].group.add(halo);
       worlds[hovered].label.classList.add('path-hover');
     }
     return true;
@@ -167,10 +174,10 @@ export function solarView(renderer, surfaces, labels, guideData) {
     if (!visible) clearHover();
   }
 
-  function hover(x, y) {
-    const body = pick(x, y, { pathsOnly: true });
-    hoverPoint = body > 0 ? [x, y] : undefined;
-    return setHover(body);
+  function hover(point) {
+    const hit = hitTest(...point);
+    hoverPoint = hit ? point : undefined;
+    return setHover(hit?.body ?? -1, hit?.guide);
   }
 
   function clearHover() {
@@ -179,13 +186,34 @@ export function solarView(renderer, surfaces, labels, guideData) {
   }
 
   function beginFocus(real) {
-    startOffset.copy(target).sub(worlds[framedFocus].group.position);
-    transition = { start: real, from: framedFocus, radius: framedRadius };
+    startTarget.copy(target);
+    startPosition.copy(camera.position);
+    sidestep.set(0, 0, 0);
+    transition = {
+      start: real, radius: framedRadius, theta: framedTheta, latitude: framedLatitude,
+    };
   }
 
   function cancelFocus() { transition = undefined; }
 
-  function draw(positions, { focus, radius, theta, latitude }, width, height, real, { repaint, positionsChanged, pendingHover }) {
+  function clearDestination(destination, focus, distance, travel) {
+    // A user-rotated view can line up with the destination. Bend only the
+    // obstructed part of the glide, sideways rather than widening the frame.
+    const clearance = solarBodyExtent(focus) + 2 * camera.near;
+    const shoulder = Math.min(2 * clearance, startPosition.distanceTo(destination));
+    const gap = eye.copy(target).addScaledVector(direction, distance).distanceTo(destination);
+    if (gap >= shoulder || shoulder <= clearance) return;
+    if (sidestep.lengthSq() === 0) {
+      sidestep.copy(startTarget).sub(destination).cross(direction);
+      if (sidestep.lengthSq() < 1e-8) sidestep.set(Math.cos(framedTheta), 0, -Math.sin(framedTheta));
+      else sidestep.normalize();
+    }
+    const bend = 1 - T.MathUtils.smoothstep(gap, clearance, shoulder);
+    // Endpoints are still exact even if live playback moves the destination.
+    target.addScaledVector(sidestep, clearance * bend * T.MathUtils.smoothstep(travel, 0, .025));
+  }
+
+  function draw(positions, { focus, radius, theta, latitude }, width, height, real, { repaint, pendingHover }) {
     // Submit the bodies before decoding or uploading any guide geometry.
     if (painted && showGuides && !guides) prepareGuides(width, height);
     if (focus === solarBodies.indexOf('Earth')) surfaces.request(false);
@@ -195,43 +223,43 @@ export function solarView(renderer, surfaces, labels, guideData) {
     const destination = worlds[focus].group.position;
     target.copy(destination);
     framedRadius = radius;
-    framedFocus = focus;
+    framedTheta = theta;
+    framedLatitude = latitude;
+    let travel = 1;
     if (transition) {
-      const elapsed = real - transition.start;
-      // Retreat around the old anchor, move across at wide framing, then approach the live target.
-      if (elapsed < 240) {
-        framedFocus = transition.from;
-        target.copy(worlds[framedFocus].group.position).add(startOffset);
-        framedRadius = T.MathUtils.lerp(transition.radius, TRANSITION_RADIUS, T.MathUtils.smoothstep(elapsed, 0, 240));
-      } else if (elapsed < 500) {
-        framedFocus = transition.from;
-        target.copy(worlds[framedFocus].group.position).add(startOffset)
-          .lerp(destination, T.MathUtils.smoothstep(elapsed, 240, 500));
-        framedRadius = TRANSITION_RADIUS;
-      } else if (elapsed < 900) {
-        framedRadius = T.MathUtils.lerp(TRANSITION_RADIUS, radius, T.MathUtils.smoothstep(elapsed, 500, 900));
+      const progress = (real - transition.start) / FOCUS_DURATION;
+      if (progress < 1) {
+        // Move the point of aim and framing together, with no intermediate overview.
+        travel = T.MathUtils.smootherstep(progress, 0, 1);
+        target.copy(startTarget).lerp(destination, travel);
+        framedRadius = T.MathUtils.lerp(transition.radius, radius, travel);
+        const turn = T.MathUtils.euclideanModulo(theta - transition.theta + Math.PI, 2 * Math.PI) - Math.PI;
+        framedTheta = transition.theta + turn * travel;
+        framedLatitude = T.MathUtils.lerp(transition.latitude, latitude, travel);
       } else cancelFocus();
     }
     if (width !== lastWidth || height !== lastHeight) {
       camera.aspect = width / height;
       distanceScale = distancePerRadius(camera.aspect);
-      camera.far = TRANSITION_RADIUS * distanceScale + 2 * FULL_SYSTEM;
+      camera.far = FULL_SYSTEM * distanceScale + 2 * FULL_SYSTEM;
       camera.updateProjectionMatrix();
       if (guides) for (const { material } of guides) material.resolution.set(width, height);
       lastWidth = width; lastHeight = height;
     }
-    const horizontal = Math.cos(latitude);
-    direction.set(Math.sin(theta) * horizontal, Math.sin(latitude), Math.cos(theta) * horizontal);
-    frameCamera(camera, target, framedRadius * distanceScale, direction);
-    // With an active hover, motion may put another guide or a body under a
-    // stationary pointer. Recheck only when model positions changed.
+    const horizontal = Math.cos(framedLatitude);
+    direction.set(Math.sin(framedTheta) * horizontal, Math.sin(framedLatitude), Math.cos(framedTheta) * horizontal);
+    const distance = framedRadius * distanceScale;
+    if (transition && travel > 0) clearDestination(destination, focus, distance, travel);
+    frameCamera(camera, target, distance, direction);
+    // Revalidate an active hover when the scene is going to repaint. A fresh
+    // pointer sample takes precedence; there is still at most one test per draw.
+    const point = pendingHover ?? (repaint ? hoverPoint : undefined);
     let hoverChanged = false;
-    if (pendingHover || (hoverPoint && positionsChanged)) {
+    if (point) {
       scene.updateMatrixWorld();
-      if (pendingHover) hoverChanged = hover(...pendingHover);
-      else if (pick(...hoverPoint, { pathsOnly: true }) !== hovered) clearHover();
+      hoverChanged = hover(point);
     }
-    if (!repaint && !hoverChanged) return hovered > 0;
+    if (!repaint && !hoverChanged) return hovered >= 0;
 
     const focalPixels = camera.projectionMatrix.elements[5] * height / 2;
     for (const [index, world] of worlds.entries()) {
@@ -263,7 +291,7 @@ export function solarView(renderer, surfaces, labels, guideData) {
             other.x + other.size > left && other.x - other.size < right &&
             other.y + other.size > top && other.y - other.size < bottom);
       }) : undefined;
-      // The active guide still needs a name when its world is out of frame.
+      // Keep the hovered world's name readable even when no anchored slot fits.
       label.classList.toggle('path-key', index === hovered && !slot);
       label.style.visibility = slot || index === hovered ? 'visible' : 'hidden';
       if (slot) {
@@ -274,11 +302,11 @@ export function solarView(renderer, surfaces, labels, guideData) {
     }
     renderer.render(scene, camera);
     painted = true;
-    return hovered > 0;
+    return hovered >= 0;
   }
 
-  function pick(x, y, { touch = false, pathsOnly = false } = {}) {
-    if (!lastWidth || x < 0 || x >= 1 || y < 0 || y >= 1 || (pathsOnly && (!showGuides || !guides))) return -1;
+  function hitTest(x, y, touch = false) {
+    if (!lastWidth || x < 0 || x >= 1 || y < 0 || y >= 1) return;
     raycaster.setFromCamera(pointer.set(2 * x - 1, 1 - 2 * y), camera);
     const forward = -raycaster.ray.direction.dot(direction);
     raycaster.near = camera.near / forward;
@@ -286,13 +314,17 @@ export function solarView(renderer, surfaces, labels, guideData) {
     // Intersect the last painted meshes, not enlarged label bounds. Nearest visible
     // surface wins, with exact depth ties retaining the renderer's body order.
     const [hit] = raycaster.intersectObjects(pickMeshes, false);
-    if (hit) return pathsOnly ? -1 : worlds.findIndex(({ group }) => group === hit.object.parent);
-    if (!showGuides || !guides) return -1;
+    if (hit) return { body: worlds.findIndex(({ group }) => group === hit.object.parent), guide: false };
+    if (!showGuides || !guides) return;
     raycaster.params.Line2 = { threshold: 2 * (touch ? 12 : 5) - guideWidth };
     // The frontmost eligible guide wins at overlaps. Stable distance sorting
     // preserves Solar System order for equal hits.
     const [path] = raycaster.intersectObjects(guides, false);
-    return path?.object.userData.body ?? -1;
+    if (path) return { body: path.object.userData.body, guide: true };
+  }
+
+  function pick(x, y, { touch = false } = {}) {
+    return hitTest(x, y, touch)?.body ?? -1;
   }
 
   return { draw, pick, setGuides, clearHover, beginFocus, cancelFocus,
