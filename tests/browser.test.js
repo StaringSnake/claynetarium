@@ -342,6 +342,7 @@ for (const phone of [false, true]) test(`orbit guides render and can be picked o
     return [width * (1 + point.x) / 2, height * (1 - point.y) / 2];
   });
   const hit = [x + local[0][0], y + local[0][1]];
+  const jupiterHit = await solarPoint(page, FULL_SYSTEM, 'Jupiter');
   const before = await samplePathPixels(scene, local);
   assert.ok(before.every(green => green > 43 && green < 140), `visible guide pixels at both Horizons projections: ${before}`);
   if (!phone) {
@@ -377,6 +378,13 @@ for (const phone of [false, true]) test(`orbit guides render and can be picked o
     await page.mouse.move(x + 10, y + 10);
     await step();
     assert.deepEqual(await samplePathPixels(scene, local), before, 'leaving the guide restores its normal color');
+    await page.mouse.move(...jupiterHit);
+    await step();
+    assert.equal(await scene.evaluate(el => getComputedStyle(el).cursor), 'pointer',
+      'a frontmost globe is a hover hit even over its guide');
+    assert.equal(await page.locator('#solar-labels').getByText('Jupiter', { exact: true })
+      .evaluate(el => getComputedStyle(el).textDecorationLine), 'underline');
+    await save('body-hover');
   }
   if (phone) {
     const session = await page.context().newCDPSession(page);
@@ -423,10 +431,24 @@ for (const phone of [false, true]) test(`orbit guides render and can be picked o
     await page.mouse.move(...hit);
     await step();
     assert.equal(await scene.evaluate(el => getComputedStyle(el).cursor), 'grab');
+    const sunHit = await solarPoint(page, FULL_SYSTEM, 'Sun');
+    await page.mouse.move(...sunHit);
+    await step();
+    assert.equal(await scene.evaluate(el => getComputedStyle(el).cursor), 'pointer',
+      'even the Sun, which has no guide, highlights with paths off');
+    assert.equal(await page.locator('#solar-labels').getByText('Sun', { exact: true })
+      .evaluate(el => getComputedStyle(el).textDecorationLine), 'underline');
+    await page.mouse.down();
+    assert.equal(await scene.evaluate(el => getComputedStyle(el).cursor), 'grabbing',
+      'starting a drag clears the hover');
+    await page.mouse.move(sunHit[0] + 20, sunHit[1]);
+    await page.mouse.up();
+    await picker.selectOption('Sun');
+    await step();
   }
   await input(...hit);
   assert.equal(await picker.inputValue(), 'Sun', 'the same point cannot pick while guides are hidden');
-  await input(...await solarPoint(page, FULL_SYSTEM, 'Jupiter'));
+  await input(...jupiterHit);
   await step();
   assert.equal(await picker.inputValue(), 'Jupiter', 'direct body picking is unchanged');
   await picker.selectOption('Neptune');
@@ -534,6 +556,10 @@ test('normal Solar focus retreats, approaches the latest selection, tracks playb
   await drag(page, ...sunCenter, 271, -159);
   await step(1);
   assert.equal(await picker.inputValue(), 'Sun', 'overview drag alone does not pick');
+  await page.mouse.move(sunCenter[0], sunCenter[1]);
+  await step(1);
+  assert.equal(await page.locator('#solar-labels').getByText('Mercury', { exact: true })
+    .evaluate(el => getComputedStyle(el).textDecorationLine), 'underline', 'hover also favors the front body');
   await page.mouse.click(...sunCenter);
   assert.equal(await picker.inputValue(), 'Mercury', 'the front body wins where visible meshes overlap');
   await picker.selectOption('Sun');
@@ -545,7 +571,11 @@ test('normal Solar focus retreats, approaches the latest selection, tracks playb
   assert.equal(await picker.inputValue(), 'Sun', 'empty background is not a hit');
   await page.mouse.click(...hit);
   assert.equal(await picker.inputValue(), 'Mars', 'the visible globe uses the same picker state');
-  await step(240);
+  await page.mouse.move(...sunCenter);
+  await step(0);
+  assert.equal(await scene.evaluate(el => getComputedStyle(el).cursor), 'grab',
+    'hover does not introduce first-use highlight rendering into an active focus move');
+  await step(190);
   const retreat = await diameter('Sun');
   assert.ok(retreat < wide * .4, `Sun shrinks during retreat: ${wide} → ${retreat}`);
 
@@ -555,8 +585,14 @@ test('normal Solar focus retreats, approaches the latest selection, tracks playb
   await step(760, 2);
   const followed = await diameter('Jupiter');
   assert.ok(followed > 100, `latest selection reaches close-up after resize: ${followed}px`);
-  const beforeDrag = await scene.screenshot();
   const { x, y, width, height } = await scene.boundingBox();
+  await page.mouse.move(x + width / 2 + 1, y + height / 2);
+  await step(16);
+  assert.equal(await scene.evaluate(el => getComputedStyle(el).cursor), 'pointer',
+    'direct body hover resumes immediately after focus settles');
+  await page.mouse.move(x + width / 2, y - 10);
+  await step(16);
+  const beforeDrag = await scene.screenshot();
   await drag(page, x + width / 2, y + height / 2, 150, -70);
   await step(16);
   assert.notDeepEqual(await scene.screenshot(), beforeDrag, 'drag changes the view angle');
@@ -584,15 +620,49 @@ test('normal Solar focus retreats, approaches the latest selection, tracks playb
     await scene.screenshot({ path: `${process.env.SOLAR_SCREENSHOTS}/desktop-following-jupiter.png`, scale: 'css' });
   }
   await picker.selectOption('Sun');
-  await step(0);
+  await step(900);
   assert.ok(await diameter('Sun') < retreat * 1.5, 'Sun restores wide overview rather than a Sun close-up');
+  const afterReturn = Date.parse(await clock(page));
+  assert.equal(afterReturn - playbackBefore, 5 * 24 * 3600 * 1000 + 900 * 3600,
+    'playback advances at the same rate while returning to the Sun');
   await earthEntry(page, 'Try demo sky');
   await waitForSceneLayout(scene);
   await step(0, 2);
   await inEarthSky(page);
-  assert.equal(Date.parse(await clock(page)) - playbackBefore, 5 * 24 * 3600 * 1000);
+  assert.equal(Date.parse(await clock(page)), afterReturn);
   assert.equal(await page.getByLabel('Playback speed').inputValue(), '3600');
   t.diagnostic(`Sun retreat ${wide}→${retreat}px; Jupiter centered ${followed}→${zoomed}px while advancing five days`);
+  assert.deepEqual(errors, []);
+});
+
+test('a phone body tap animates, then switching to reduced motion finishes on the next frame', async t => {
+  const { page, errors } = await opened(t, {
+    ...devices['iPhone 13'], viewport: { width: 390, height: 664 }, reducedMotion: 'no-preference',
+  }, controlledFrames, false);
+  const draws = (count, delta) => page.evaluate(([count, delta]) => {
+    window.solarDraws = 0;
+    window.stepFrames(count, delta);
+    return window.solarDraws;
+  }, [count, delta]);
+  await openPanel(page, 'Time');
+  await button(page, 'Pause').tap();
+  await button(page, 'Close Time').tap();
+  await button(page, 'Explore').tap();
+  await button(page, 'Inner planets').tap();
+  await draws(2, 16);
+  const inner = (await solarPixels(page, INNER_SYSTEM, ['Sun'])).Sun.diameter;
+  await page.touchscreen.tap(...await solarPoint(page, INNER_SYSTEM, 'Venus'));
+  assert.equal(await solarPicker(page).inputValue(), 'Venus', 'the exact tap selects before the next frame');
+  assert.equal(await draws(1, 0), 1);
+  assert.equal((await solarPixels(page, INNER_SYSTEM, ['Sun'])).Sun.diameter, inner,
+    'the first frame at the selection time retains the old framing');
+  assert.equal(await draws(10, 16), 10, 'one render per frame during the move');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  assert.equal(await draws(1, 16), 1);
+  const settled = (await solarPixels(page, FULL_SYSTEM, ['Venus'], 'Venus')).Venus.diameter;
+  assert.ok(settled > 120, 'the preference change finishes at the centered close-up');
+  assert.equal(await draws(60, 16), 0, 'no transition repaints once settled while paused');
+  assert.equal(await clock(page), fixed);
   assert.deepEqual(errors, []);
 });
 

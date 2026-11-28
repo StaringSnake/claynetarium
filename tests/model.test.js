@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Frustum, Line3, Matrix4, Vector3 } from 'three';
+import { Frustum, Line3, Matrix4, Vector3, MeshBasicMaterial } from 'three';
 import { DAY, FIRST_DAY, LAST_DAY, civilClock, dateText, offsetText } from '../src/clock.js';
 import { skyAt, solarEvents, solarBodies, solarOrbitGuides, solarSystemAt, spaceAt, EARTH_KM, MOON_KM } from '../src/astronomy.js';
 import { solarDisplayPosition, unpackSolarGuide } from '../src/solar-display.js';
 import { solarGuideBuildOptions } from '../scripts/solar-guide-asset.mjs';
-import { solarBodyExtent, solarCamera, FULL_SYSTEM, INNER_SYSTEM } from '../src/solar-view.js';
+import { solarBodyExtent, solarCamera, solarView, FULL_SYSTEM, INNER_SYSTEM, SOLAR_ORIENTATION } from '../src/solar-view.js';
 import { cities, coordinateSite, findCities } from '../src/places.js';
 import { lunarSites, lunarSkyAt, solarLimbAltitude, nextLunarSolarEvents } from '../src/lunar.js';
 import { earthRows, apolloSun, solarBrackets } from './fixtures/lunar-horizons.js';
@@ -16,6 +16,79 @@ const city = name => cities.find(place => place.name === name);
 const iso = instant => new Date(instant).toISOString();
 const close = (actual, expected, tolerance, name) =>
   assert.ok(Math.abs(actual - expected) <= tolerance, `${name}: ${actual} not within ${tolerance} of ${expected}`);
+
+test('Solar focus blends pullback, travel and approach, and retargets from the painted pose', t => {
+  const originalDocument = globalThis.document;
+  globalThis.document = { createElement: () => ({ style: {}, classList: { toggle() {} }, offsetWidth: 30 }) };
+  try {
+    const positions = solarSystemAt(Date.parse(solarReference[0][0]));
+    for (const [width, height] of [[1220, 900], [390, 664]]) {
+      let frame;
+      const renderer = { render(scene, camera) {
+        frame = { position: camera.position.clone(), rotation: camera.quaternion.clone() };
+      } };
+      const view = solarView(renderer, { earth: new MeshBasicMaterial(), request() {} }, { append() {} }, []);
+      view.setGuides(false);
+      const jupiter = solarBodies.indexOf('Jupiter'), pluto = solarBodies.indexOf('Pluto');
+      const radius = focus => focus ? 2.65 * solarBodyExtent(focus) : FULL_SYSTEM;
+      const state = (focus, orientation = SOLAR_ORIENTATION) => ({ focus, radius: radius(focus), ...orientation });
+      const paint = (time, selection, worlds = positions) => {
+        view.draw(worlds, selection, width, height, time, { repaint: true });
+        return frame;
+      };
+      const initial = paint(0, state(jupiter));
+      view.beginFocus(0);
+      const samples = Array.from({ length: 901 }, (_, time) => paint(time, state(pluto)));
+      const destination = new Vector3(...solarDisplayPosition(positions[pluto]));
+      const direction = new Vector3(0, 0, 1).applyQuaternion(initial.rotation);
+      const separation = destination.clone().sub(new Vector3(...solarDisplayPosition(positions[jupiter])));
+      const across = separation.addScaledVector(direction, -separation.dot(direction)).normalize();
+      const travel = time => samples[time].position.clone().sub(initial.position).dot(across);
+      const pullback = time => samples[time].position.dot(direction);
+      close(samples[0].position.distanceTo(initial.position), 0, 1e-9, 'starts from current position');
+      assert.ok(travel(240) > 1 && travel(900) - travel(500) > 1, 'travel overlaps both pullback and approach');
+      assert.ok(pullback(240) - pullback(0) > 10 && pullback(500) - pullback(900) > 10,
+        'camera pulls away before it approaches');
+      for (const time of [240, 500]) {
+        const prior = samples[time].position.clone().sub(samples[time - 1].position);
+        const next = samples[time + 1].position.clone().sub(samples[time].position);
+        assert.ok(Math.min(prior.length(), next.length()) > .02, `no pause at ${time} ms`);
+        assert.ok(prior.distanceTo(next) < .002, `velocity stays continuous at ${time} ms`);
+        t.diagnostic(`${width}×${height} at ${time} ms: ${prior.length().toFixed(4)} → ${next.length().toFixed(4)} scene units/ms`);
+      }
+      const frameSteps = samples.slice(1).map((sample, i) => sample.position.distanceTo(samples[i].position));
+      assert.ok(Math.max(...frameSteps) < (pullback(500) - pullback(900)) / 100,
+        'no millisecond step exceeds 1% of the approach distance');
+      assert.equal(view.animating, false);
+      const expected = solarCamera(width, height, radius(pluto), destination);
+      close(frame.position.distanceTo(expected.position), 0, 1e-9, 'same end pose as direct framing');
+      close(1 - Math.abs(frame.rotation.dot(expected.quaternion)), 0, 1e-9, 'same end orientation');
+
+      const angled = { theta: 1.4, latitude: .22 };
+      paint(1000, state(jupiter, angled));
+      view.beginFocus(1000);
+      const interrupted = paint(1390, state(pluto, angled));
+      view.beginFocus(1390);
+      const restart = paint(1390, state(0)); // Sun also restores the overview angle.
+      close(restart.position.distanceTo(interrupted.position), 0, 1e-9, 'retarget position');
+      close(1 - Math.abs(restart.rotation.dot(interrupted.rotation)), 0, 1e-9, 'retarget orientation');
+      const next = paint(1406, state(0));
+      assert.ok(next.position.distanceTo(interrupted.position) < .3, 'first restarted frame stays near the painted pose');
+      const end = paint(2290, state(0));
+      const direct = paint(2290, state(0));
+      close(end.position.distanceTo(direct.position), 0, 1e-9, 'Sun ends at the overview');
+
+      view.beginFocus(2300);
+      paint(2550, state(pluto));
+      view.cancelFocus(); // Same path used when reduced motion is enabled in flight.
+      const reduced = paint(2550, state(pluto));
+      close(reduced.position.distanceTo(expected.position), 0, 1e-9, 'cancel immediately reaches the same destination');
+    }
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
 
 test('heliocentric ecliptic vectors agree with independent Horizons samples, including Pluto depth', () => {
   for (const [date, rows] of solarReference) {

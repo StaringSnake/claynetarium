@@ -407,9 +407,9 @@ function updateSolarZoomControls() {
   $('view-badge').textContent = 'Not to scale';
 }
 
-function centerSolar(focus, radius = focus === 0 ? FULL_SYSTEM : 2.65 * solarBodyExtent(focus)) {
+function centerSolar(focus, { radius = focus === 0 ? FULL_SYSTEM : 2.65 * solarBodyExtent(focus), animate = false } = {}) {
   clearSolarHover();
-  if (focus && focus !== solar.focus && !motion.matches) solarRenderer.beginFocus(performance.now());
+  if (animate && !motion.matches) solarRenderer.beginFocus(performance.now());
   else solarRenderer.cancelFocus();
   if (focus === 0) Object.assign(solar, SOLAR_ORIENTATION);
   solar.focus = focus;
@@ -423,7 +423,7 @@ function followSolar(focus) {
   if (focus < 0 || mode !== 'solar') return;
   welcomeDismissed = true;
   showPanel(null, false);
-  if (focus !== solar.focus || focus === 0) centerSolar(focus);
+  if (focus !== solar.focus || focus === 0) centerSolar(focus, { animate: focus !== solar.focus });
 }
 
 solarBody.replaceChildren(...solarBodies.map(body => new Option(body === 'Pluto' ? 'Pluto (dwarf planet)' : body, body)));
@@ -437,7 +437,7 @@ solarPaths.addEventListener('click', () => {
   dirty = true;
 });
 explore.addEventListener('click', () => dismissWelcome(true));
-$('solar-zoom-preset').addEventListener('click', () => centerSolar(0, solarPresetRadius()));
+$('solar-zoom-preset').addEventListener('click', () => centerSolar(0, { radius: solarPresetRadius() }));
 
 function frameEarth() {
   updateSpace();
@@ -555,7 +555,7 @@ function draw(real) {
         pendingSolarHover = undefined;
       }
       const hovering = solarRenderer.draw(solarPositions, solar, width, height, real,
-        { repaint: repaint || dirty, positionsChanged: changed, pendingHover });
+        { repaint: repaint || dirty, pendingHover });
       view.classList.toggle('path-hover', hovering);
     }
     dirty = false;
@@ -921,7 +921,9 @@ view.addEventListener('pointerdown', event => {
 });
 view.addEventListener('pointermove', event => {
   const before = pointers.get(event.pointerId);
-  if (!before && mode === 'solar' && showSolarPaths && !pointers.size && !event.buttons &&
+  // Keep first-use highlight rendering out of the camera move. The next
+  // pointer move after settling can hover either a visible body or a guide.
+  if (!before && mode === 'solar' && !pointers.size && !event.buttons &&
       event.pointerType !== 'touch' && !solarRenderer.animating) {
     if (event.target !== view) clearSolarHover();
     else pendingSolarHover = { x: event.clientX, y: event.clientY };
